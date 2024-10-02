@@ -1,0 +1,327 @@
+---
+title: "Supplementary Data"
+author: "Ifan LIN"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages and functions
+
+### Packages
+
+```{r packages}
+require(dplyr)
+require(magrittr)
+require(tidyverse)
+```
+
+### Functions
+
+## Parameters
+
+```{r parameters}
+respond_col <- c(NR = '#C71E1D', R = '#015069')
+
+tax_col <- c(k__Bacteria = "#f9b4ab", k__Eukaryota = "#FDEBD3",
+             k__Archaea = "#7aa9d1", k__Viruses = "#96b6ad")
+
+cohort_col <- c(`2017_Frankel` = "#EE6B3B", `2018_Gopalakrishnan` = "#A02C5D",
+                `2018_Maston` = "#EC0F47", `2018_Routy` = "#700460",
+                `2019_Peters` = "#022C7A", `2019_Zheng` = "#1A1333",
+                `2021_Baruch` = "#FBBF54", `2021_Spencer` = "#045459",
+                `2021_Davar` = "#ABD96D", `2022_McCulloch` = "#15C286",
+                `2022_Lee` = "#262949", `2022_Derosa` = "#087353")
+
+cancer_col <- c(MM = "#7f58af", HCC = '#64C5EB', 
+                NSCLC = '#E84D8A', RCC = '#FEB326')
+save_path_prefix <- "../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/"
+
+```
+
+## Loading Data
+
+-   `med_nor_list`: median normalization with cover 10% and cutoff 1e-04 (add min value 1e-06)
+
+    -   `med_nor_list[[Kingdom]]`: `k__Bacteria`, `k__Euakrayota`, `k__Archaea`, `k__Viruses`
+
+-   `wil_res`: Wilcox test results.
+
+    -   `wil_res[[sub_type]]`: `CancerType`, `CohDis`
+
+    -   `wil_res[[sub_type]][[``Kingdom``]]`: `k__Bacteria`, `k__Euakrayota`, `k__Archaea`, `k__Viruses`
+
+-   median normalization
+
+    -   `bICI_mn_list`: NormMed result for discovery cohort
+
+    -   `pICI_mn_list`: NormMed result for paired samples (validation cohort 1)
+
+    -   `iICI_mn_list`: NormMed result for idependent samples (validation cohort 2)
+
+-   Complete RDS (`R6`/ `microtable`)
+
+    -   `bICI_ds_list`: before ICI `R6` / `microtable`for sub-kingdom
+
+    -   `pICI_ds_list`: pairedICI `R6` / `microtable`for sub-kingdom
+
+    -   `iICI_ds_list`: independent ICI `R6` / `microtable`for sub-kingdom
+    
+-   `imp_summary`: random forest feature summary
+
+    -   `imp_summary[[kingdom]]`: `All`, `k__Bacteria`, `k__Eukaryota`
+    
+    -   `imp_summary[[kingdom]][[sub_cancer]]`: `MM`, `NSCLC`, `RCC`
+
+```{r loading data}
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "01.PreProcessing/MN_Idx/"))
+med_nor_list <- list()
+med_nor_list[["k__Bacteria"]] <- readRDS(file = "MN_res-Bacteria-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Bacteria_mn_res-v1.0.rds")
+med_nor_list[["k__Eukaryota"]] <- readRDS(file = "MN_res-Eukaryota-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Eukaryota_mn_res-v1.0.rds")
+med_nor_list[["k__Archaea"]] <- readRDS(file = "MN_res-Archaea-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Archaea_mn_res-v1.0.rds")
+med_nor_list[["k__Viruses"]] <- readRDS(file = "MN_res-Viruses-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Viruses_mn_res-v1.0.rds")
+setwd(tmp_path)
+
+## filter the selected features, establish a new NormMed matrix
+for (sel_kd in names(med_nor_list)) {
+  med_nor_list[[sel_kd]][["sel_mn_df"]] <- med_nor_list[[sel_kd]][["nm_df"]] %>% 
+    select(med_nor_list[[sel_kd]][["sel_otu"]] %>%
+             rownames())%>% 
+    t() %>% as.data.frame()
+}
+
+
+# Wilcox results 
+wil_res <- list()
+
+## cancer type
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN/rds"))
+wil_res[["CancerType"]]$k__Bacteria <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Bacteria-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Eukaryota <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Eukaryota-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Archaea <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Archaea-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Viruses <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Viruses-bICI-v1.0.rds"))
+setwd(tmp_path)
+
+
+## Cohort disease
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds"))
+
+wil_res[["CohDis"]]$k__Bacteria <- readRDS("2023-03-15-Wilcox-MN_Idx-Bacteria-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Eukaryota <- readRDS("2023-03-15-Wilcox-MN_Idx-Eukaryota-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Archaea <- readRDS("2023-03-15-Wilcox-MN_Idx-Archaea-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Viruses <- readRDS("2023-03-15-Wilcox-MN_Idx-Viruses-CohDis-v1.0.rds")
+setwd(tmp_path)
+
+
+## Loading previous rds files 
+
+bICI_ds_list <- readRDS(paste0(save_path_prefix, "01.PreProcessing/RDS/2022-10-19-bICI_rare_ds_list_subKingdom-v1.0.rds"))
+pICI_ds_list <- readRDS(paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-pICI_rare_ds_list_subKingdom-v1.0.rds"))
+iICI_ds_list <- readRDS(paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-iICI_rare_ds_list_subKingdom-v1.0.rds"))
+
+## median normalization
+
+# NormMed result for paired samples (validation cohort 1)
+bICI_mn_list <- list(
+  k__Bacteria = med_nor_list$k__Bacteria$sel_mn_df[, rownames(bICI_ds_list$k__Bacteria$sample_table)],
+  k__Eukaryota = med_nor_list$k__Eukaryota$sel_mn_df[, rownames(bICI_ds_list$k__Eukaryota$sample_table)],
+  k__Archaea = med_nor_list$k__Archaea$sel_mn_df[, rownames(bICI_ds_list$k__Archaea$sample_table)],
+  k__Viruses = med_nor_list$k__Viruses$sel_mn_df[, rownames(bICI_ds_list$k__Viruses$sample_table)]
+)
+
+# NormMed result for paired samples (validation cohort 1)
+pICI_mn_list <- list(
+  k__Bacteria = med_nor_list$k__Bacteria$sel_mn_df[, rownames(pICI_ds_list$k__Bacteria$sample_table)],
+  k__Eukaryota = med_nor_list$k__Eukaryota$sel_mn_df[, rownames(pICI_ds_list$k__Eukaryota$sample_table)],
+  k__Archaea = med_nor_list$k__Archaea$sel_mn_df[, rownames(pICI_ds_list$k__Archaea$sample_table)],
+  k__Viruses = med_nor_list$k__Viruses$sel_mn_df[, rownames(pICI_ds_list$k__Viruses$sample_table)]
+)
+
+# NormMed result for independence samples (validation cohort 2)
+iICI_mn_list <- list(
+  k__Bacteria = med_nor_list$k__Bacteria$sel_mn_df[, rownames(iICI_ds_list$k__Bacteria$sample_table)],
+  k__Eukaryota = med_nor_list$k__Eukaryota$sel_mn_df[, rownames(iICI_ds_list$k__Eukaryota$sample_table)],
+  k__Archaea = med_nor_list$k__Archaea$sel_mn_df[, rownames(iICI_ds_list$k__Archaea$sample_table)],
+  k__Viruses = med_nor_list$k__Viruses$sel_mn_df[, rownames(iICI_ds_list$k__Viruses$sample_table)]
+)
+
+
+
+## random forest feature summary
+imp_summary <- readRDS("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/ImpIdx/2023-04-18-my_imp_summary-v1.0.rds")
+
+```
+
+## Pre-process
+
+```{r pre-process}
+intersect_rf_cand <- Reduce(intersect, 
+                            list(imp_summary$All$NSCLC$FullNames,
+                                 imp_summary$All$RCC$FullNames,
+                                 imp_summary$k__Eukaryota$MM$FullNames))
+
+setdiff_rf_cand <- list(
+  nsclc_rcc = intersect(imp_summary$All$NSCLC$FullNames, 
+                        imp_summary$All$RCC$FullNames) %>%
+    setdiff(., intersect_rf_cand),
+  nsclc_mm = intersect(imp_summary$All$NSCLC$FullNames, 
+                       imp_summary$k__Eukaryota$MM$FullNames) %>%
+    setdiff(., intersect_rf_cand),
+  all_intersect = intersect_rf_cand)
+
+## Add "All" in mn_list
+bICI_mn_list[["All"]] <- bind_rows(list(bICI_mn_list$k__Bacteria,
+                                        bICI_mn_list$k__Eukaryota)) %>%
+  select_if(~ !any(is.na(.)))
+
+pICI_mn_list[["All"]] <- bind_rows(list(pICI_mn_list$k__Bacteria,
+                                        pICI_mn_list$k__Eukaryota)) %>%
+  select_if(~ !any(is.na(.)))
+
+iICI_mn_list[["All"]] <- bind_rows(list(iICI_mn_list$k__Bacteria,
+                                        iICI_mn_list$k__Eukaryota)) %>%
+  select_if(~ !any(is.na(.)))
+
+
+bICI_meta <- list(All = bICI_ds_list$all$sample_table[colnames(bICI_mn_list[["All"]]),],
+                  k__Eukaryota = bICI_ds_list$k__Eukaryota$sample_table)
+
+pICI_meta <- list(All = pICI_ds_list$all$sample_table[colnames(pICI_mn_list[["All"]]),],
+                  k__Eukaryota = pICI_ds_list$k__Eukaryota$sample_table)
+
+iICI_meta <- list(All = iICI_ds_list$all$sample_table[colnames(iICI_mn_list[["All"]]),],
+                  k__Eukaryota = iICI_ds_list$k__Eukaryota$sample_table)
+```
+
+## Requirement 1
+
+-   Comparison for random forest selected candidates in Validation cohort 1
+
+```{r REQ 1 for V1}
+rf_features <- c(setdiff_rf_cand$nsclc_rcc, 
+                 setdiff_rf_cand$nsclc_mm, 
+                 setdiff_rf_cand$all_intersect)
+
+table(pICI_ds_list$all$sample_table$Disease)
+
+table(pICI_ds_list$all$sample_table$Disease, 
+      pICI_ds_list$all$sample_table$Response)
+
+comp1_df <- cbind.data.frame(pICI_ds_list$all$sample_table %>% 
+                               t() %>%
+                               subset(select = pICI_meta$All %>% rownames()) %>%
+                               t() %>%
+                               subset(select = c("Response", "Disease", "Period")) %>%
+                               as.data.frame() %>%
+                               mutate(Period = ifelse(.$Period == 'Before_ICI', 'Before_ICI', 'After_ICI')), 
+                             pICI_mn_list$All %>% 
+                               t() %>%
+                               subset(select = rf_features)) %>%
+  setNames(gsub(".+\\|s__", "", names(.)))
+
+tmp_df <- matrix(data = NA, 
+                 nrow = length(rf_features), 
+                 ncol = 5) %>%
+  set_rownames(rf_features %>% gsub(".+\\|s__", "", .)) %>%
+  set_colnames(c('R_NR', 
+                 'bIR_aIR', 'bINR_aINR', 
+                 'bIR_bINR', 'aIR_aINR'))
+
+comp1_res <- list(MM = tmp_df,
+                  NSCLC = tmp_df,
+                  RCC = tmp_df)
+comparison1_list <- list(R_NR = list(group1 = "R",
+                                     group2 = "NR"),
+                         bIR_aIR = list(group1 = c("R", "Before_ICI"),
+                                        group2 = c("R", "After_ICI")),
+                         bINR_aINR = list(group1 = c("NR", "Before_ICI"),
+                                          group2 = c("NR", "After_ICI")),
+                         bIR_bINR = list(group1 = c("R", "Before_ICI"),
+                                         group2 = c("NR", "Before_ICI")),
+                         aIR_aINR = list(group1 = c("R", "After_ICI"),
+                                         group2 = c("NR", "After_ICI")))
+## test 1
+for (sub_can in names(comp1_res)) {
+  for (sub_comp in names(comparison1_list)) {
+    for (i in c(4:ncol(comp1_df))) {
+      if (sub_comp == 'R_NR') {
+        g1 <- comp1_df %>% 
+          filter(Disease == sub_can ,
+                 Response == comparison1_list[[sub_comp]][['group1']]) %>%
+          subset(select = colnames(comp1_df)[i]) %>%
+          unlist()
+        g2 <- comp1_df %>% 
+          filter(Disease == sub_can ,
+                 Response == comparison1_list[[sub_comp]][['group2']]) %>%
+          subset(select = colnames(comp1_df)[i]) %>%
+          unlist()
+        comp1_res[[sub_can]][colnames(comp1_df)[i], sub_comp] <- wilcox.test(g1, g2, exact = F)$p.value
+      }else{
+        g1 <- comp1_df %>% 
+          filter(Disease == sub_can ,
+                 Response == comparison1_list[[sub_comp]][['group1']][1],
+                 Period == comparison1_list[[sub_comp]][['group1']][2]) %>%
+          subset(select = colnames(comp1_df)[i]) %>%
+          unlist()
+        g2 <- comp1_df %>% 
+          filter(Disease == sub_can ,
+                 Response == comparison1_list[[sub_comp]][['group2']][1],
+                 Period == comparison1_list[[sub_comp]][['group2']][2]) %>%
+          subset(select = colnames(comp1_df)[i]) %>%
+          unlist()
+        comp1_res[[sub_can]][colnames(comp1_df)[i], sub_comp] <- wilcox.test(g1, g2, exact = F)$p.value
+      }
+    }
+  }
+}
+
+
+## test 2
+comp1_res2 <- tmp_df
+for (sub_comp in names(comparison1_list)) {
+  for (i in c(4:ncol(comp1_df))) {
+    if (sub_comp == 'R_NR') {
+      g1 <- comp1_df %>% 
+        filter(Response == comparison1_list[[sub_comp]][['group1']]) %>%
+        subset(select = colnames(comp1_df)[i]) %>%
+        unlist()
+      g2 <- comp1_df %>% 
+        filter(Response == comparison1_list[[sub_comp]][['group2']]) %>%
+        subset(select = colnames(comp1_df)[i]) %>%
+        unlist()
+      comp1_res2[colnames(comp1_df)[i], sub_comp] <- wilcox.test(g1, g2, exact = F)$p.value
+    }else{
+      g1 <- comp1_df %>% 
+        filter(Response == comparison1_list[[sub_comp]][['group1']][1],
+               Period == comparison1_list[[sub_comp]][['group1']][2]) %>%
+        subset(select = colnames(comp1_df)[i]) %>%
+        unlist()
+      g2 <- comp1_df %>% 
+        filter(Response == comparison1_list[[sub_comp]][['group2']][1],
+               Period == comparison1_list[[sub_comp]][['group2']][2]) %>%
+        subset(select = colnames(comp1_df)[i]) %>%
+        unlist()
+      comp1_res2[colnames(comp1_df)[i], sub_comp] <- wilcox.test(g1, g2, exact = F)$p.value
+    }
+  }
+}
+
+
+
+
+```
+
+-   Comparison for random forest selected candidates in Validation cohort 2
+
+```{r REQ 1 for V2}
+
+
+```
+
+## Requirement 2

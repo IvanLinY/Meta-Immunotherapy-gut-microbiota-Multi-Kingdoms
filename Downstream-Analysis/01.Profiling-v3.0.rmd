@@ -1,0 +1,3551 @@
+---
+title: "Profiling"
+author: "IvanLIN"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages and functions
+
+### Packages
+
+```{r pacakges}
+
+
+if (!require(file2meco)) install.packages("file2meco", repos = BiocManager::repositories()); require(file2meco) 
+if (!require(microeco)) devtools::install_github("ChiLiubio/microeco"); require(microeco) 
+if (!require(dplyr)) devtools::install_github("hadley/dplyr"); require(dplyr)  
+if (!require(RColorBrewer)) install.packages("RColorBrewer"); require(RColorBrewer) 
+if (!require(magrittr)) devtools::install_github("tidyverse/magrittr"); require(magrittr)  
+if (!require(patchwork)) devtools::install_github("thomasp85/patchwork"); require(patchwork)  
+if (!require(reshape2)) install.packages("reshape2"); require(reshape2)  
+if (!require(ggpubr)) devtools::install_github("kassambara/ggpubr"); require(ggpubr) 
+if (!require(ggplot2)) install.packages("ggplot2"); require(ggplot2)
+if (!require(grid)) install.packages("grid"); require(grid)  
+if (!require(gridExtra)) install.packages("gridExtra"); require(gridExtra)  
+if (!require(cowplot)) install.packages("cowplot"); require(cowplot)  
+if (!require(vegan)) install.packages("vegan"); require(vegan)  
+if (!require(limma)) BiocManager::install("limma"); require(limma) 
+if (!require(ggstatsplot)) install.packages("ggstatsplot"); require(ggstatsplot)  
+if (!require(combinat)) install.packages("combinat"); require(combinat)  # combn 递归
+if (!require(Hmisc)) install.packages("Hmisc"); require(Hmisc) # rcorr
+if (!require(GGally)) install.packages("GGally"); require(GGally)  
+if (!require(tibble)) install.packages("tibble"); require(tibble)  
+if (!require(ggExtra)) install.packages("ggExtra"); require(ggExtra)  
+if (!require(ggforce)) install.packages("ggforce"); require(ggforce)
+
+```
+
+### Functions
+
+#### FileCreate
+
+```{r file create}
+FileCreate <- function(DirPath = "./",Prefix = "ExampleTest", Suffix = "pdf", version = "0.0"){
+  date=as.character(Sys.Date())
+  DirPath = gsub("/$","",DirPath)
+  Suffix = gsub('^[.]',"",Suffix)
+  if(! dir.exists(DirPath)){
+    dir.create(DirPath,recursive =TRUE)
+  }
+  if (version == "0.0") {
+    version=10
+    while(TRUE){
+      version_=paste(unlist(strsplit(as.character(version),"")),collapse=".")
+      DirPathName = paste0(DirPath,"/",date,'-',Prefix,'-v',version_,".",Suffix)
+      if(! file.exists(DirPathName)){
+        return(DirPathName)
+        break
+      }
+      version = version + 1
+    }
+  }else{
+    DirPathName = paste0(DirPath,"/",date,'-',Prefix,'-v',version,".",Suffix)
+    if(! dir.exists(DirPathName)){
+      return(DirPathName)
+    }
+    return(DirPathName)
+  }
+}
+```
+
+#### RowMeanRemoveOutlier
+
+```{r RowMeanRemoveOutlier}
+RowMeanRemoveOutlier <- function(df){
+  apply(df, 1, function(x) mean(RemoveOutlier(x)$common_list))
+}
+```
+
+#### TaxSep
+
+```{r TaxSep}
+TaxSep <- function(import_ds, 
+                   threshold = c(k__Bacteria = .01, 
+                                 k__Eukaryota = .01,
+                                 k__Viruses = .01,
+                                 k__Archaea = .01),
+                   separate = c("k__Bacteria", "k__Eukaryota", 
+                                "k__Viruses", "k__Archaea")){
+  ds_list <- list()
+  for (sep_cand in separate) {
+    tmp_ds <- import_ds$clone()
+    tmp_ds$tax_table %<>% subset(Kingdom == sep_cand)
+    tmp_ds$cal_abund()
+    tmp_ds$tidy_dataset()
+    tmp_ds$cal_alphadiv(PD = FALSE)
+    # View(tmp_ds$taxa_abund$Species)
+    ds_list[[sep_cand]] <- tmp_ds
+  }
+  return(ds_list)
+}
+```
+
+#### Alpha_boxplot
+
+```{r alpha_boxplot}
+
+Alpha_boxplot <- function(alpha_mt, save_or_not = F, prefix = "all",
+                          save_path = "./", size = c(8, 4),
+                          col_group = "Response", x_group = "Disease",
+                          alpha_col = c(respond_col, cancer_col),
+                          alpha_comp = list(c("R", "NR")),
+                          alpha_idx = c("Chao1", "Shannon", "Simpson")){
+  if (save_or_not) {
+    alpha_csv <- FileCreate(DirPath = save_path, 
+                            Prefix = paste0("AlphaDiversity-Matrix-", prefix),
+                            Suffix = "csv")
+    write.csv(x = alpha_mt, file = alpha_csv)
+  }
+  plot_list <- list()
+  for (sel_idx in alpha_idx) {
+    tmp_plot <- ggboxplot(alpha_mt, x = x_group, y = sel_idx,
+                          color = col_group, notch = T, 
+                          bxp.errorbar = T, add = "jitter",
+                          add.params = list(alpha = .2),
+                          outlier.shape = NA) +
+      stat_compare_means(aes(group = .data[[col_group]]), label = "p.format") +
+      scale_color_manual(values = respond_col) +
+      geom_hline(yintercept = mean(alpha_mt[[sel_idx]]), linetype = 2) +
+      stat_compare_means(method = "anova", label.y = max(alpha_mt[[sel_idx]])*1.1)
+      
+    plot_list[[sel_idx]] <- tmp_plot
+  }
+  if (save_or_not) {
+    plot_list[['legend']] <- as_ggplot(get_legend(tmp_plot))
+    legend_pdf <- FileCreate(DirPath = save_path, 
+                             Prefix = "Legend",
+                             Suffix = "pdf")
+    pdf(file = legend_pdf, width = size[1], height = size[2])
+    plot(plot_list[['legend']])
+    dev.off()
+    sub_pdf <- FileCreate(DirPath = save_path, 
+                          Prefix = paste0("AlphaDiversity-BoxPlot-", prefix),
+                          Suffix = "pdf")
+    pdf(file = sub_pdf, width = size[1], height = size[2])
+    for (sel_idx in alpha_idx) {
+      plot(plot_list[[sel_idx]] + theme(legend.position = "none"))
+    }
+    dev.off()
+  }
+  
+  return(plot_list)
+}
+
+
+```
+
+#### My_PCoA
+
+```{r My_PCoA}
+
+My_PCoA <- function(otu_table, group, pcoa_col,
+                    save_or_not = F,
+                    save_path = "./",
+                    Prefix = "PCoA",
+                    sample_as_row = T, size = c(5, 5),
+                    distance = "bray",
+                    pcoa_title = "Bray Curtis PCoA",
+                    subgroup = NULL){
+  if (!sample_as_row) {
+    otu_table <- as.data.frame(t(otu_table))
+  }
+  if (nrow(otu_table) != length(group)) {
+    return(message("please confirmed otu sample size is equal to group's length!"))
+  }
+  
+  dist_res <- vegdist(otu_table, method = distance)
+  
+  set.seed(123)
+  dune.div <- adonis2(
+    otu_table ~ group,
+    permutations = 999,
+    method = distance
+  )
+  dune_adonis <- paste0("P-value: ", dune.div$`Pr(>F)`[[1]])
+
+  
+  pcoa_res = cmdscale(dist_res, k=3, eig=TRUE) 
+  
+  points_res <- as.data.frame(pcoa_res$points) 
+  
+  was_res <- wascores(pcoa_res$points, otu_table)
+  
+  eig_res = pcoa_res$eig
+  if (is.null(subgroup)) {
+    pcoa_mt = cbind(points_res, group)
+  }else{
+    pcoa_mt = cbind(points_res, group, subgroup)
+  }
+  
+  colnames(pcoa_mt)[1:3] <- c("PCoA1", "PCoA2", "PCoA3")
+  
+  if (any(table(pcoa_mt$group) <= 3)) {
+    pcoa_plot <- ggplot(pcoa_mt, aes(x=PCoA1, y=PCoA2, colour=group)) + 
+      theme(legend.title=element_blank()) +
+      theme_bw() + 
+      labs(x = paste0("PCoA 1 (", format(100 * eig_res[1] / sum(eig_res), digits=4), "%)"),
+           y = paste0("PCoA 2 (", format(100 * eig_res[2] / sum(eig_res), digits=4), "%)"),
+           title= pcoa_title, subtitle = dune_adonis)+
+      geom_mark_ellipse() + 
+      scale_color_manual(values = pcoa_col)+
+      geom_point(alpha=.3, aes(shape=subgroup))
+  }else{
+    pcoa_plot <- ggplot(pcoa_mt, aes(x=PCoA1, y=PCoA2, colour=group)) + 
+      theme(legend.title=element_blank()) +
+      theme_bw() + 
+      labs(x = paste0("PCoA 1 (", format(100 * eig_res[1] / sum(eig_res), digits=4), "%)"),
+           y = paste0("PCoA 2 (", format(100 * eig_res[2] / sum(eig_res), digits=4), "%)"),
+           title= pcoa_title, subtitle = dune_adonis)+
+      stat_ellipse() + 
+      scale_color_manual(values = pcoa_col)+
+      geom_point(alpha=.3, aes(shape=subgroup))
+  }
+  
+  
+  # pcoa_plot <- ggplot(pcoa_mt, aes(x=PCoA1, y=PCoA2, colour=group)) + 
+  #   theme(legend.title=element_blank()) +
+  #   theme_bw() + 
+  #   labs(x = paste0("PCoA 1 (", format(100 * eig_res[1] / sum(eig_res), digits=4), "%)"),
+  #        y = paste0("PCoA 2 (", format(100 * eig_res[2] / sum(eig_res), digits=4), "%)"),
+  #        title= pcoa_title, subtitle = dune_adonis)+
+  #   stat_ellipse() + 
+  #   scale_color_manual(values = pcoa_col)+
+  #   geom_point(alpha=.3, aes(shape=subgroup))
+  
+  # adonis2_g_res <- adonis2(otu_table ~ group, permutations = 99)
+  # adonis2_sg_res <- adonis2(otu_table ~ subgroup, permutations = 99)
+  return_list <- list()
+
+  if (is.null(subgroup)) {
+    pcoa_plot <- pcoa_plot + geom_point(alpha=.3) 
+  }else{
+    pcoa_plot <- pcoa_plot + geom_point(alpha=.3, aes(shape=subgroup))
+    sub_plot_list <- list()
+    for (sub_ in unique(subgroup)) {
+      pcoa_mt_ <- pcoa_mt
+      pcoa_col_ <- c(pcoa_col, other = "gray")
+      pcoa_alpha_ <- c(rep(.7, length(unique(pcoa_mt$group))), .1)
+      names(pcoa_alpha_) <- c(unique(pcoa_mt$group), "other")
+      pcoa_mt_$group <- ifelse(pcoa_mt_$subgroup ==sub_, pcoa_mt_$group, "other")
+      sub_plot_list[[sub_]] <- ggplot(pcoa_mt_, aes(x=PCoA1, y=PCoA2, colour=group))+
+        theme(legend.title=element_blank()) +
+        theme_bw() + 
+        labs(x = paste0("PCoA 1 (", format(100 * eig_res[1] / sum(eig_res), digits=4), "%)"),
+             y = paste0("PCoA 2 (", format(100 * eig_res[2] / sum(eig_res), digits=4), "%)"),
+             title= pcoa_title)+
+        geom_mark_ellipse(data = pcoa_mt_ %>% subset(subgroup == sub_)) +
+        scale_color_manual(values = pcoa_col_)+
+        geom_point(aes(shape=subgroup, alpha = group))+
+        scale_alpha_manual(values = pcoa_alpha_) +
+        ylim(layer_scales(pcoa_plot)$y$range$range)+
+        xlim(layer_scales(pcoa_plot)$x$range$range)
+        
+    }
+    return_list$sub_plot_list <- sub_plot_list
+  }
+  # pcoa_plot <- pcoa_plot +
+    # labs(caption = paste0("Group: P = ", adonis2_g_res$`Pr(>F)`[1]))
+  return_list$pcoa_plot <- pcoa_plot
+
+  if (save_or_not) {
+    my_pcoa_csv <- FileCreate(DirPath = save_path, Prefix = paste0(Prefix, "_matrix"), Suffix = 'csv')
+    write.csv(x = pcoa_mt, file = my_pcoa_csv)
+    my_rds <- FileCreate(DirPath = save_path, Prefix = paste0(Prefix, "_list"), Suffix = 'rds')
+    saveRDS(object = return_list, file = my_rds)
+    my_pdf <- FileCreate(DirPath = save_path, Prefix = paste0(Prefix, "_plot"), Suffix = 'pdf')
+    pdf(file = my_pdf, width = size[1], height = size[2])
+    plot(pcoa_plot + theme(legend.position = "none"))
+    if (!is.null(subgroup)) {
+      for (sub_ in unique(subgroup)) {
+        plot(sub_plot_list[[sub_]]+theme(legend.position = "none"))
+      }
+    }
+    plot(as_ggplot(get_legend(pcoa_plot)))
+    
+    dev.off()
+  }
+  return(return_list)
+}
+
+
+```
+
+#### Phylum_summary
+
+```{r Phylum summary}
+Phylum_summary <- function(otu, group, subgroup, cutoff = 0.01, other = "Other"){
+  otu <- as.data.frame(t(otu))
+  sel_feature <- apply(otu, 2, mean) %>% 
+    sort(., decreasing = T) %>% 
+    .[. >cutoff] %>% 
+    names %>%
+    .[!grepl("\\|$", .)]
+  
+  my_summary1 <- cbind(otu, group, subgroup) %>% 
+    as.data.frame() %>% 
+    group_by(group, subgroup) %>%
+    summarise_at(vars(sel_feature), 
+                 function(x) mean(as.numeric(x))) 
+  
+  my_summary2 <- cbind(otu, group = rep("All", length(group)), subgroup) %>% 
+    as.data.frame() %>% 
+    group_by(group, subgroup) %>%
+    summarise_at(vars(sel_feature), 
+                 function(x) mean(as.numeric(x)))
+  
+  my_summary3 <- cbind(otu, group, subgroup = rep("All", length(subgroup))) %>% 
+    as.data.frame() %>% 
+    group_by(group, subgroup) %>%
+    summarise_at(vars(sel_feature), 
+                 function(x) mean(as.numeric(x)))
+  
+  my_summary4 <- cbind(otu, group = rep("All", length(group)), subgroup = rep("All", length(subgroup))) %>% 
+    as.data.frame() %>% 
+    group_by(group, subgroup) %>%
+    summarise_at(vars(sel_feature), 
+                 function(x) mean(as.numeric(x)))
+  
+  
+  my_summary <- rbind(my_summary1, my_summary2, my_summary3,my_summary4)
+  
+  my_summary[[other]] <- 1 - rowSums(my_summary[,3:ncol(my_summary)])
+  
+  my_melt <- melt(my_summary, id.vars = c("group", "subgroup"), value.name = "prop", 
+                  variable.name = "feature")
+  my_melt$prop <- my_melt$prop*100
+  
+  return(list(summary_mt = my_summary, summary_melt = my_melt))
+
+}
+
+```
+
+## Parameters
+
+```{r parameters}
+respond_col <- c(NR = '#C71E1D', R = '#015069')
+
+tax_col <- c(k__Bacteria = "#f9b4ab", k__Eukaryota = "#FDEBD3",
+             k__Archaea = "#7aa9d1", k__Viruses = "#96b6ad")
+
+cohort_col <- c(`2017_Frankel` = "#EE6B3B", `2018_Gopalakrishnan` = "#A02C5D",
+                `2018_Maston` = "#EC0F47", `2018_Routy` = "#700460",
+                `2019_Peters` = "#022C7A", `2019_Zheng` = "#1A1333",
+                `2021_Baruch` = "#FBBF54", `2021_Spencer` = "#045459",
+                `2021_Davar` = "#ABD96D", `2022_McCulloch` = "#15C286",
+                `2022_Lee` = "#262949", `2022_Derosa` = "#087353")
+
+cancer_col <- c(MM = "#7f58af", NSCLC = '#E84D8A',
+                RCC = '#FEB326', HCC = '#64C5EB')
+save_path_prefix <- "../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/"
+
+```
+
+## Sample pre-processing
+
+### Loading sample and save RDS
+
+```{r loading data}
+import_again <- F
+if (import_again) {
+  abund_path <- paste0(save_path_prefix, '00.Documents/3741/03.Kraken2_GenBank_merge-bracken_mpa.tsv')
+  sample_path <- paste0(save_path_prefix, '00.Documents/rerun/sample_info.tsv')
+  match_path <- paste0(save_path_prefix, '00.Documents/rerun/match_table.tsv')
+  dataset <- mpa2meco(abund_table = abund_path,
+                      sample_data = sample_path,
+                      match_table = match_path)
+  # 19723 taxa are removed from the otu_table, as the abundance is 0 ...
+  dataset$tidy_dataset()
+  
+  
+  
+  raw_data_list <- list()
+  bac_ds <- dataset$clone()
+  bac_ds$tax_table %<>% subset(Kingdom == "k__Bacteria")
+  bac_ds$tidy_dataset()
+  
+  arc_ds <- dataset$clone()
+  arc_ds$tax_table %<>% subset(Kingdom == "k__Archaea")
+  arc_ds$tidy_dataset()
+  
+  
+  euk_ds <- dataset$clone()
+  euk_ds$tax_table %<>% subset(Kingdom == "k__Eukaryota")
+  euk_ds$tidy_dataset()
+  
+  
+  vir_ds <- dataset$clone()
+  vir_ds$tax_table %<>% subset(Kingdom == "k__Viruses")
+  vir_ds$tidy_dataset()
+  
+  raw_data_list$all <- dataset$clone()
+  raw_data_list$bac <- bac_ds$clone()
+  raw_data_list$arc <- arc_ds$clone()
+  raw_data_list$euk <- euk_ds$clone()
+  raw_data_list$vir <- vir_ds$clone()
+  
+  
+  raw_data_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                         Prefix = "raw_data_list", Suffix = "rds")
+  saveRDS(object = raw_data_list, file = raw_data_rds)
+
+  
+  align_df <- data.frame(align_num = raw_data_list$all$sample_sums(),
+                         bac_num = raw_data_list$bac$sample_sums(),
+                         euk_num = raw_data_list$euk$sample_sums(),
+                         arc_num = raw_data_list$arc$sample_sums(),
+                         vir_num = raw_data_list$vir$sample_sums(),
+                         row.names = names(raw_data_list$vir$sample_sums()))
+   
+  quantile_df <- data.frame(quantile=prettyNum(round(dataset$sample_sums() %>% 
+                                                       quantile(., seq(0, 1, .05)), digits = 0), big.mark = ','),
+                            bac_quan=prettyNum(round(bac_ds$sample_sums() %>% 
+                                                       quantile(., seq(0, 1, .05)), digits = 0), big.mark = ','),
+                            arc_quan=prettyNum(round(arc_ds$sample_sums() %>% 
+                                                       quantile(., seq(0, 1, .05)), digits = 0), big.mark = ','),
+                            euk_quan=prettyNum(round(euk_ds$sample_sums() %>% 
+                                                       quantile(., seq(0, 1, .05)), digits = 0), big.mark = ','),
+                            vir_quan=prettyNum(round(vir_ds$sample_sums() %>% 
+                                                       quantile(., seq(0, 1, .05)), digits = 0), big.mark = ','))
+  
+  quantile_csv <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/SampleSize"),
+                         Prefix = "quantile_df", Suffix = "csv")
+  write.csv(x = quantile_df, file = quantile_csv)
+  
+  quantile_df
+#         quantile    bac_quan  arc_quan  euk_quan   vir_quan
+# 0%        17,137      15,892         1        18         16
+# 5%     5,646,636   5,559,622       136     2,064        555
+# 10%    7,152,278   7,092,930       205     2,833        973
+# 15%    8,253,514   8,052,888       270     3,628      1,540
+# 20%    8,799,177   8,712,478       337     4,287      2,202
+# 25%    9,323,392   9,212,980       442     4,972      3,240
+# 30%    9,704,004   9,598,808       584     5,654      4,095
+# 35%   10,121,694   9,994,032       742     6,431      5,325
+# 40%   10,573,466  10,435,593       965     7,272      6,721
+# 45%   11,094,394  10,938,784     1,271     8,204      8,293
+# 50%   11,572,234  11,481,021     1,643     9,316     10,724
+# 55%   12,355,030  12,298,631     2,115    10,665     12,992
+# 60%   13,064,954  12,998,532     2,727    12,444     17,072
+# 65%   13,917,683  13,808,421     3,671    14,220     22,454
+# 70%   16,006,715  15,850,432     5,175    16,391     30,020
+# 75%   19,315,500  19,123,058     8,865    19,706     43,128
+# 80%   22,227,255  22,086,866    17,593    24,663     66,742
+# 85%   28,007,062  27,858,868    31,964    32,143     98,569
+# 90%   37,664,548  37,452,621    67,013    44,274    179,315
+# 95%   55,762,167  55,702,548   194,288    68,782    347,070
+# 100% 141,633,757 141,581,333 4,280,719 1,536,995 20,160,403
+  
+  
+############### save (TBD) ###################
+}else{
+  quantile_df <- read.csv(file = paste0(save_path_prefix, 
+                                        "01.PreProcessing/SampleSize/2022-12-14-quantile_df-v1.0.csv"),
+                          row.names = 1, header = T)
+  raw_data_list <- readRDS(paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-14-raw_data_list-v1.0.rds"))
+}
+```  
+  
+  
+### Sample inclusion criteria
+
+#### Sequencing reads num
+
+```{r Sequencing reads num}
+calculate_or_not <- F
+if (calculate_or_not) {
+  reads_thrd <- 5000000
+  
+  pe_size_df <- read.table(paste0(save_path_prefix, '00.Documents/rerun/02.KneadData_res/KneadData_merge_PE.tsv'),
+                           row.names = 1, header = T, sep = "\t")
+  se_size_df <- read.table(paste0(save_path_prefix, '00.Documents/rerun/02.KneadData_res/KneadData_merge_SE.tsv'),
+                           row.names = 1, header = T, sep = "\t")
+  comb_size_df <- data.frame(sample_name = c(rownames(pe_size_df), rownames(se_size_df)),
+                             seq_num = c(pe_size_df$final.pair1, se_size_df$final.single),
+                             row.names =  c(rownames(pe_size_df), rownames(se_size_df)))
+  rownames(comb_size_df) <- lapply(rownames(comb_size_df), 
+                                   function(x){
+                                     dataset$sample_table[dataset$sample_table$Access_ID == x, "SampleID"]
+                                   })
+  
+  comb_size_df <- merge(comb_size_df, align_df, by = 'row.names')
+  rownames(comb_size_df) <- comb_size_df$Row.names
+  comb_size_df <- comb_size_df[, c(-1, -2)]
+  
+  comb_size_df$seq_criteria <- ifelse(comb_size_df$seq_num >= 5000000,
+                                      "keep", "discard")
+  comb_size_df$bac_criteria <- ifelse(comb_size_df$bac_num >= 5000000,
+                                      "keep", "discard")
+  comb_size_df$euk_criteria <- ifelse(comb_size_df$euk_num >= 5000,
+                                      "keep", "discard")
+  comb_size_df$arc_criteria <- ifelse(comb_size_df$arc_num >= 5000,
+                                      "keep", "discard")
+  comb_size_df$vir_criteria <- ifelse(comb_size_df$vir_num >= 5000,
+                                      "keep", "discard")
+  
+  comb_size_df <- merge(comb_size_df, dataset$sample_table, by = 'row.names') %>%
+    column_to_rownames("Row.names")
+  
+  table(comb_size_df$seq_criteria)
+  # discard    keep 
+  #      56    1359 
+  # comb_size_df %>% column_to_rownames("Row.names")
+  # rownames(comb_size_df) <- comb_size_df[, "Row.names"]
+  # comb_size_df %<>% .[, -1]
+  
+  comb_size_df_ <- comb_size_df[comb_size_df$seq_criteria == "keep", ]
+  
+  comb_size_csv <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/chi_square"),
+                              Prefix = "comb_size", 
+                              Suffix = "csv")
+  write.csv(x = comb_size_df, file = comb_size_csv)
+
+  comb_size_csv_ <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/chi_square"),
+                              Prefix = "comb_size-removeLowAlign", 
+                              Suffix = "csv")
+  write.csv(x = comb_size_df_, file = comb_size_csv_)
+}else{
+  comb_size_df <- read.csv(file = paste0(save_path_prefix, "01.PreProcessing/chi_square/2022-12-14-comb_size-v1.0.csv"), 
+                           header = T, row.names = 1)
+  comb_size_df_ <- read.csv(file = paste0(save_path_prefix,
+                                         "01.PreProcessing/chi_square/2022-12-14-comb_size-removeLowAlign-v1.0.csv"), 
+                           header = T, row.names = 1)
+}
+
+
+## alignment chi-square test ##
+chi_list <- list()
+chi_align <- ggbarstats(
+  data = comb_size_df,
+  x = seq_criteria, 
+  y = Response) +
+  scale_fill_manual(values = c(keep = "#1C9E77",
+                               discard = "grey")) +
+  theme(legend.position="none", 
+        plot.subtitle = element_text(size = 4), 
+        plot.caption = element_text(size = 4)) 
+
+chi_list$align <- chi_align
+
+if (calculate_or_not) {
+  chi_align_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/chi_square"),
+                           Prefix = "Chi_square_Alignment", 
+                           Suffix = "pdf")
+  pdf(file = chi_align_pdf, width = 3, height = 4)
+  plot(chi_align)
+  plot(chi_align + labs(caption = NULL, subtitle = NULL))
+  dev.off()
+}
+```
+
+#### Sub-kingdom alignment
+
++ Bacteria > 5M (1,356)
+
++ Archaea > 5k (828)
+
++ Eukaryota > 5k (1,355)
+
++ Virus > 5k (1,242)
+
+```{r Sub-kingdom alignment}
+calculate_or_not <- F
+if (calculate_or_not) {
+  ## Bacteria chi-square test ##
+  chi_bac <- ggbarstats(
+    data = comb_size_df_,
+    x = bac_criteria, 
+    y = Response) +
+    scale_fill_manual(values = c(keep = as.character(tax_col['k__Bacteria']),
+                                 discard = "grey")) +
+    theme(legend.position="none", 
+          plot.subtitle = element_text(size = 4), 
+          plot.caption = element_text(size = 4)) 
+  
+  chi_bac_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/chi_square"),
+                            Prefix = "Chi_square_Bacteria", 
+                            Suffix = "pdf")
+  pdf(file = chi_bac_pdf, width = 3, height = 4)
+  plot(chi_bac)
+  plot(chi_bac + labs(caption = NULL, subtitle = NULL))
+  dev.off()
+  
+  
+  ## Eukaryota chi-square test ##
+  chi_euk <- ggbarstats(
+    data = comb_size_df_,
+    x = euk_criteria, 
+    y = Response) +
+    scale_fill_manual(values = c(keep = as.character(tax_col['k__Eukaryota']),
+                                 discard = "grey")) +
+    theme(legend.position="none", 
+          plot.subtitle = element_text(size = 4), 
+          plot.caption = element_text(size = 4)) 
+  
+  chi_euk_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/chi_square"),
+                            Prefix = "Chi_square_Eukaryota", 
+                            Suffix = "pdf")
+  pdf(file = chi_euk_pdf, width = 3, height = 4)
+  plot(chi_euk)
+  plot(chi_euk + labs(caption = NULL, subtitle = NULL))
+  dev.off()
+  
+  ## Archaea chi-square test ##
+  chi_arc <- ggbarstats(
+    data = comb_size_df_,
+    x = arc_criteria, 
+    y = Response) +
+    scale_fill_manual(values = c(keep = as.character(tax_col['k__Archaea']),
+                                 discard = "grey")) +
+    theme(legend.position="none", 
+          plot.subtitle = element_text(size = 4), 
+          plot.caption = element_text(size = 4)) 
+  
+  chi_arc_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/chi_square"),
+                            Prefix = "Chi_square_Archaea", 
+                            Suffix = "pdf")
+  pdf(file = chi_arc_pdf, width = 3, height = 4)
+  plot(chi_arc)
+  plot(chi_arc + labs(caption = NULL, subtitle = NULL))
+  dev.off()
+  
+  ## Virus chi-square test ##
+  
+  chi_vir <- ggbarstats(
+    data = comb_size_df_,
+    x = vir_criteria, 
+    y = Response) +
+    scale_fill_manual(values = c(keep = as.character(tax_col['k__Viruses']),
+                                 discard = "grey")) +
+    theme(legend.position="none", 
+          plot.subtitle = element_text(size = 4), 
+          plot.caption = element_text(size = 4)) 
+  
+  chi_vir_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/chi_square"),
+                            Prefix = "Chi_square_Viruses", 
+                            Suffix = "pdf")
+  pdf(file = chi_vir_pdf, width = 3, height = 4)
+  plot(chi_vir)
+  plot(chi_vir + labs(caption = NULL, subtitle = NULL))
+  dev.off()
+  
+  chi_list$bac <- chi_bac
+  chi_list$euk <- chi_euk
+  chi_list$arc <- chi_arc
+  chi_list$vir <- chi_vir
+  
+  chi_plot_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/chi_square"),
+                            Prefix = "Chi_square_Plot", 
+                            Suffix = "rds")
+  saveRDS(object = chi_list, file = chi_plot_rds)
+}else{
+  chi_list <-readRDS(file = paste0(save_path_prefix, "01.PreProcessing/chi_square/2022-10-19-Chi_square_Plot-v1.0.rds"))
+}
+
+
+```
+
+### Save subset rds
+
+```{r subset rds}
+calculate_or_not <- F
+if (calculate_or_not) {
+  bICI_ds <- raw_data_list$all$clone()
+  bICI_ds$sample_table %<>% subset(SampleID %in% rownames(comb_size_df_))
+  
+  # sort the patient and sample information
+  pat_Freq <- table(bICI_ds$sample_table$Patient_ID,
+                    bICI_ds$sample_table$Period) %>%
+    as.matrix() %>% as.data.frame()
+  pat_cast <- acast(pat_Freq, Var1 ~ Var2) %>% as.data.frame()
+  
+  bICI_ds$sample_table %<>% subset(Period == "Before_ICI")
+  bICI_ds$tidy_dataset()
+  bICI_ds$cal_abund()
+  
+  bICI_patient <- pat_cast[pat_cast$Before_ICI >= 1, ]
+  message(sum(bICI_patient$Before_ICI)," paired samples number from ", nrow(bICI_patient), " patients.")
+  
+  bICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                         Prefix = paste0("bICI_ds-",
+                                         length(bICI_ds$sample_names()), "S-", 
+                                         length(unique(bICI_ds$sample_table$Patient_ID)), "P"), 
+                         Suffix = "rds")
+  saveRDS(object = bICI_ds, file = bICI_rds)
+  
+  ## paired samples
+  pICI_ds <- clone(raw_data_list$all)
+  pICI_ds$sample_table %<>% subset(SampleID %in% rownames(comb_size_df_))
+  
+  # exclude the before ICI sample
+  paired_patient <- pat_cast[pat_cast$Before_ICI >= 1 & rowSums(pat_cast[, -2]) >= 1, ]
+  message(sum(paired_patient)," paired samples number from ", nrow(paired_patient), " patients.")
+  pICI_ds$sample_table %<>% subset(Patient_ID %in% rownames(paired_patient))
+  pICI_ds$tidy_dataset() 
+  pICI_ds$cal_abund()
+  print(pICI_ds)
+  pICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                         Prefix = paste0("pICI_ds-", 
+                                         length(pICI_ds$sample_names()), "S-", 
+                                         length(unique(pICI_ds$sample_table$Patient_ID)), "P"), 
+                         Suffix = "rds")
+  
+  saveRDS(object = pICI_ds, file = pICI_rds)
+  
+  
+  ## independent samples (FMT or after ICI)
+  iICI_ds <- clone(raw_data_list$all)
+  iICI_ds$sample_table %<>% subset(SampleID %in% rownames(comb_size_df_))
+  
+  ind_patient <- pat_cast[pat_cast$Before_ICI == 0 & rowSums(pat_cast[, -2]) >= 1, ]
+  message(sum(ind_patient)," independent samples number from ", nrow(ind_patient), " patients (FMT or after ICI).")
+  iICI_ds$sample_table %<>% subset(Patient_ID %in% rownames(ind_patient)) 
+  iICI_ds$tidy_dataset() 
+  iICI_ds$cal_abund()
+  print(iICI_ds)
+  iICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                         Prefix = paste0("iICI_ds-", 
+                                         length(iICI_ds$sample_names()), "S-", 
+                                         length(unique(iICI_ds$sample_table$Patient_ID)), "P"), 
+                         Suffix = "rds")
+  
+  saveRDS(object = iICI_ds, file = iICI_rds)
+  
+}else{
+  bICI_ds <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-14-bICI_ds-894S-894P-v1.0.rds"))
+  pICI_ds <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-14-pICI_ds-184S-64P-v1.0.rds"))
+  iICI_ds <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-14-iICI_ds-345S-136P-v1.0.rds"))
+}
+# kingdom composition
+bICI_kingdom_df <- merge(bICI_ds$taxa_abund$Kingdom %>% t(), 
+                         comb_size_df_, by = 'row.names') %>%
+  column_to_rownames("Row.names")
+
+pICI_kingdom_df <- merge(pICI_ds$taxa_abund$Kingdom %>% t(), 
+                         comb_size_df_, by = 'row.names') %>%
+  column_to_rownames("Row.names")
+
+iICI_kingdom_df <- merge(iICI_ds$taxa_abund$Kingdom %>% t(),
+                         comb_size_df_, by = 'row.names') %>%
+  column_to_rownames("Row.names")
+
+```
+
+### kingdom bias (before ICI)
+
+#### Bacteria bias
+
+```{r bacteria bias}
+save_or_not = F
+
+### Bacteria
+bac_boxplot <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$bac_criteria == 'keep',],
+                      aes(x = Response, y = k__Bacteria, col = Response)) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='atanh') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(bac_boxplot)
+
+bac_boxplot2 <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$bac_criteria == 'keep',],
+                      aes(x = Response, y = k__Bacteria, col = Response)) +
+  facet_wrap(~Disease, nrow = 1) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='atanh') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(bac_boxplot2)
+
+bac_boxplot3 <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$bac_criteria == 'keep',]%>% 
+                         subset(Disease == "NSCLC"),
+                      aes(x = Response, y = k__Bacteria, col = Response)) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='atanh') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(bac_boxplot3)
+
+if (save_or_not) {
+  bac_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Bacteria_Response", 
+                            Suffix = "pdf")
+  pdf(file = bac_box_pdf, 
+      width = 3, 
+      height = 5)  
+  plot(bac_boxplot)
+  plot(bac_boxplot + theme(text = element_blank()))
+  dev.off()
+  
+  bac2_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Bacteria_Response-CancerType", 
+                            Suffix = "pdf")
+  pdf(file = bac2_box_pdf, 
+      width = 12, 
+      height = 5)  
+  plot(bac_boxplot2)
+  plot(bac_boxplot2 + theme(text = element_blank()))
+  dev.off()
+  
+  bac3_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Bacteria_Response-NSCLC", 
+                            Suffix = "pdf")
+  pdf(file = bac3_box_pdf, 
+      width = 3, 
+      height = 5)  
+  plot(bac_boxplot3)
+  plot(bac_boxplot3 + theme(text = element_blank()))
+  dev.off()
+}
+
+```
+
+#### Eukaryota bias
+
+```{r eukaryota bias}
+save_or_not <- F
+
+### Eukaryota
+euk_boxplot <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$euk_criteria == 'keep',],
+                      aes(x = Response, y = k__Eukaryota, col = Response)) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(euk_boxplot)
+
+euk_boxplot2 <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$euk_criteria == 'keep',],
+                       aes(x = Response, y = k__Eukaryota, col = Response)) +
+  facet_wrap(~Disease, nrow = 1) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(euk_boxplot2)
+
+
+euk_boxplot3 <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$euk_criteria == 'keep',]%>% 
+                         subset(Disease == "NSCLC"),
+                      aes(x = Response, y = k__Eukaryota, col = Response)) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(euk_boxplot3)
+
+
+if (save_or_not) {
+  euk_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Eukaryota_Response", 
+                            Suffix = "pdf")
+  pdf(file = euk_box_pdf, 
+      width = 3, 
+      height = 5)  
+  plot(euk_boxplot)
+  plot(euk_boxplot + theme(text = element_blank()))
+  dev.off()
+  
+  euk2_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Eukaryota_Response-CancerType", 
+                            Suffix = "pdf")
+  pdf(file = euk2_box_pdf, 
+      width = 12, 
+      height = 5)  
+  plot(euk_boxplot2)
+  plot(euk_boxplot2 + theme(text = element_blank()))
+  dev.off()
+  
+  euk3_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Eukaryota_Response-NSCLC", 
+                            Suffix = "pdf")
+  pdf(file = euk3_box_pdf, 
+      width = 3, 
+      height = 5)  
+  plot(euk_boxplot3)
+  plot(euk_boxplot3 + theme(text = element_blank()))
+  dev.off()
+
+  
+}
+
+```
+
+#### Archaea bias
+
+```{r archaea bias}
+save_or_not <- F
+
+### Archaea
+arc_boxplot <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$arc_criteria == 'keep',],
+                      aes(x = Response, y = k__Archaea, col = Response)) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(arc_boxplot)
+
+arc_boxplot2 <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$arc_criteria == 'keep',],
+                      aes(x = Response, y = k__Archaea, col = Response)) +
+  facet_wrap(~Disease, nrow = 1) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(arc_boxplot2)
+
+
+if (save_or_not) {
+  arc_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Archaea_Response", 
+                            Suffix = "pdf")
+  
+  pdf(file = arc_box_pdf, 
+      width = 3, 
+      height = 5)  
+  plot(arc_boxplot)
+  plot(arc_boxplot + theme(text = element_blank()))
+  dev.off()
+  
+  arc2_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Archaea_Response-CancerType", 
+                            Suffix = "pdf")
+  
+  pdf(file = arc2_box_pdf, 
+      width = 12, 
+      height = 5)  
+  plot(arc_boxplot2)
+  plot(arc_boxplot2 + theme(text = element_blank()))
+  dev.off()
+  
+}
+```
+
+#### Viruses bias
+
+```{r viruses bias}
+save_or_not <- F
+
+### Viruses
+vir_boxplot <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$vir_criteria == 'keep',],
+                      aes(x = Response, y = k__Viruses, col = Response)) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+plot(vir_boxplot)
+
+vir_boxplot2 <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$vir_criteria == 'keep',],
+                      aes(x = Response, y = k__Viruses, col = Response)) +
+  facet_wrap(~Disease, nrow = 1) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none') 
+plot(vir_boxplot2)
+# 
+# vir_boxplot3 <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$vir_criteria == 'keep',] %>% 
+#                          subset(Disease == "NSCLC"),
+#                       aes(x = Response, y = k__Viruses, col = Response)) +
+#   stat_boxplot(geom = "errorbar",width=.15) + 
+#   geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+#   scale_y_continuous(trans='logit') +
+#   geom_jitter(alpha = 0.3, width = .3) +
+#   scale_color_manual(values = respond_col) + 
+#   stat_compare_means(comparisons = list(c("NR", "R")), 
+#                      size = 6, label = format("p.format" , scientific = T)) +
+#   theme_bw() +
+#   theme(legend.position = 'none')
+# plot(vir_boxplot3)
+
+
+if (save_or_not) {
+  vir_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Viruses_Response", 
+                            Suffix = "pdf")
+  
+  pdf(file = vir_box_pdf, 
+      width = 3, 
+      height = 5)  
+  plot(vir_boxplot)
+  plot(vir_boxplot + theme(text = element_blank()))
+  dev.off()
+  
+  vir2_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+                            Prefix = "Viruses_Response-CancerType", 
+                            Suffix = "pdf")
+  
+  pdf(file = vir2_box_pdf, 
+      width = 12, 
+      height = 5)  
+  plot(vir_boxplot2)
+  plot(vir_boxplot2 + theme(text = element_blank()))
+  dev.off()
+  
+  # vir3_box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/Kingdom_Composition"),
+  #                           Prefix = "Viruses_Response-NSCLC", 
+  #                           Suffix = "pdf")
+  # 
+  # pdf(file = vir3_box_pdf, 
+  #     width = 3, 
+  #     height = 5)  
+  # plot(vir_boxplot3)
+  # plot(vir_boxplot3 + theme(text = element_blank()))
+  # dev.off()
+
+  
+}
+```
+
+## Alpha Diversity
+
+### Alpha Diversity Calculation
+
+```{r alpha diversity calculation}
+calculate_or_not <- F
+
+# parameters
+sample_size <- c(all = 5000000,
+                 k__Bacteria = 5000000,
+                 k__Eukaryota = 5000,
+                 k__Archaea = 5000,
+                 k__Viruses = 5000)
+
+if (calculate_or_not) {
+  bICI_ds_list <- list()
+  bICI_filter_ds_list <- list()
+  bICI_rare_ds_list <- list()
+  
+  for (tax in names(sample_size)) {
+    bICI_ds_list[[tax]] <- bICI_ds$clone()
+    if (! tax == 'all') {
+      bICI_ds_list[[tax]]$tax_table %<>% subset(Kingdom == tax)
+      bICI_ds_list[[tax]]$tidy_dataset()
+    }
+    bICI_ds_list[[tax]]$cal_abund()
+    bICI_ds_list[[tax]]$tidy_dataset()
+    
+    bICI_rare_ds_list[[tax]] <- bICI_ds_list[[tax]]$clone()
+    bICI_rare_ds_list[[tax]]$rarefy_samples(sample.size = sample_size[tax])
+    bICI_rare_ds_list[[tax]]$cal_abund()
+    bICI_rare_ds_list[[tax]]$tidy_dataset()
+  
+    bICI_rare_ds_list[[tax]]$cal_alphadiv(PD = FALSE, measures = c("Observed", "Chao1", "Shannon", "Simpson"))
+    bICI_rare_ds_list[[tax]]$cal_betadiv()
+    bICI_rare_ds_list[[tax]]$tidy_dataset()
+  }
+  
+  bICI_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "bICI_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = bICI_ds_list, file = bICI_ds_rds)
+  
+  
+  for (tax in names(sample_size)) {
+    bICI_filter_ds_list[[tax]] <- bICI_ds_list[[tax]]$clone()
+    bICI_filter_ds_list[[tax]]$sample_table <- bICI_rare_ds_list[[tax]]$sample_table
+    bICI_filter_ds_list[[tax]]$tidy_dataset()
+  }
+  bICI_filter_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "bICI_filter_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = bICI_filter_ds_list, file = bICI_filter_ds_rds)
+  
+  bICI_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "bICI_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = bICI_ds_list, file = bICI_ds_rds)
+  
+  bICI_rare_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "bICI_rare_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = bICI_rare_ds_list, file = bICI_rare_ds_rds)
+  
+  
+  alpha_df_list <- list()
+  
+  for (measures in c("Observed", "Chao1", "Shannon", "Simpson")) {
+    alpha_df <- matrix(NA, nrow = length(sample_size), ncol = length(cancer_col)+1,
+                       dimnames = list(names(sample_size), c("all", names(cancer_col))))
+    for (tax in names(sample_size)) {
+      tmp_df <- merge(bICI_rare_ds_list[[tax]]$alpha_diversity, 
+                      bICI_rare_ds_list[[tax]]$sample_table, 
+                      by = "row.names") %>% column_to_rownames("Row.names")
+      for (cancer in c("all", names(cancer_col))) {
+        if (cancer == 'all') {
+          alpha_df[tax, cancer] <- wilcox.test(as.formula(paste0(measures, " ~ Response")), 
+                                               data = tmp_df)$p.value
+        }else{
+          alpha_df[tax, cancer] <- wilcox.test(as.formula(paste0(measures, " ~ Response")), 
+                                               data = tmp_df, subset = Disease ==cancer)$p.value
+        }
+        
+      }
+    }
+    alpha_df_list[[measures]] <- alpha_df
+    alpha_csv <- FileCreate(DirPath = paste0(save_path_prefix, "02.AlphaDiversity/BoxPlot"),
+                            Prefix = paste0("Wilcox-Response-AlphaDiversity-", measures),
+                            Suffix = "csv")
+    write.csv(x = alpha_df, file = alpha_csv)
+  }
+  alpha_df_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                             Prefix = "alpha_df_list", 
+                             Suffix = "rds")
+  saveRDS(object = alpha_df_list, file = alpha_df_rds)
+}else{
+  alpha_df_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-09-22-alpha_df_list-v1.0.rds"))
+  bICI_rare_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-09-22-bICI_rare_ds_list_subKingdom-v1.0.rds"))
+  bICI_filter_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-10-19-bICI_filter_ds_list_subKingdom-v1.0.rds"))
+  bICI_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-09-22-bICI_ds_list_subKingdom-v1.0.rds"))
+}
+```
+
+
+### Box Plot
+
+```{r alpha subgroup}
+for (tax in names(bICI_rare_ds_list)) {
+  alpha_mt <- merge(bICI_rare_ds_list[[tax]]$alpha_diversity, 
+                    bICI_rare_ds_list[[tax]]$sample_table,
+                    by = "row.names") %>% column_to_rownames("Row.names")
+  
+  tmp_alpha_res <- Alpha_boxplot(alpha_mt = alpha_mt, save_or_not = T, 
+                                 save_path = paste0(save_path_prefix, 
+                                                    "02.AlphaDiversity/BoxPlot"),
+                                 prefix = tax)
+}
+```
+### Scatter Plot
+
+#### Matrix calculate
+
+```{r scatter matrix}
+reg_mt <- merge(bICI_rare_ds_list$all$alpha_diversity[, c(2,6, 7)],
+                bICI_rare_ds_list$k__Bacteria$alpha_diversity[, c(2,6, 7)],
+                all = T, by = "row.names") %>% column_to_rownames("Row.names") %>%
+  merge(., bICI_rare_ds_list$k__Eukaryota$alpha_diversity[, c(2,6, 7)],
+        all = T, by = "row.names") %>% column_to_rownames("Row.names") %>%
+  merge(., bICI_rare_ds_list$k__Archaea$alpha_diversity[, c(2,6, 7)],
+        all = T, by = "row.names") %>% column_to_rownames("Row.names") %>%
+  merge(., bICI_rare_ds_list$k__Viruses$alpha_diversity[, c(2,6, 7)],
+        all = T, by = "row.names") %>% column_to_rownames("Row.names") %>%
+  set_colnames(paste(rep(c("All", "k__Bacteria", "k__Eukaryota", 
+                           "k__Archaea", "k__Viruses"), each = 3), 
+                     rep(c("Chao1", "Shannon", "Simpson"), 5), sep = "_")) %>%
+  merge(., comb_size_df_, by = "row.names") %>% column_to_rownames("Row.names") 
+
+```
+
+#### Chao1-Chao1 index
+
+```{r chao1}
+save_or_not <- F
+alpha_idx <- "Chao1"
+reg_plot0 <- ggscatterstats(data = reg_mt, 
+                            x = All_Chao1, 
+                            xlab = "Chao1",
+                            y = align_num,
+                            ylab = "Alignments num",
+                            type = "spearman", 
+                            xfill = "#D8A7B1",
+                            yfill = "#B6E2D3",
+                            title = paste0("Relationship between ", 
+                                           "Chao1 index and alignment reads number"))
+
+plot(reg_plot0)
+reg_plot1 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Chao1,
+                            xlab = "Bacteria",
+                            y = k__Eukaryota_Chao1,
+                            ylab = "Eukaryota",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Eukaryota'],
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Eukaryota', " in ", alpha_idx))
+plot(reg_plot1)
+reg_plot2 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Chao1,
+                            xlab = "Bacteria",
+                            y = k__Archaea_Chao1,
+                            ylab = "Archaea",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Archaea'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Archaea', " in ", alpha_idx))
+plot(reg_plot2)
+reg_plot3 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Chao1,
+                            xlab = "Bacteria",
+                            y = k__Viruses_Chao1,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot3)
+reg_plot4 <- ggscatterstats(data = reg_mt, 
+                            x = k__Eukaryota_Chao1,
+                            xlab = "Eukaryota",
+                            y = k__Archaea_Chao1,
+                            ylab = "Archaea",
+                            type = "spearman",
+                            xfill = tax_col['k__Eukaryota'],
+                            yfill = tax_col['k__Archaea'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Eukaryota", " & ",
+                                           'Archaea', " in ", alpha_idx))
+plot(reg_plot4)
+reg_plot5 <- ggscatterstats(data = reg_mt, 
+                            x = k__Eukaryota_Chao1,
+                            xlab = "Eukaryota",
+                            y = k__Viruses_Chao1,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Eukaryota'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Eukaryota", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot5)
+reg_plot6 <- ggscatterstats(data = reg_mt, 
+                            x = k__Archaea_Chao1,
+                            xlab = "Archaea",
+                            y = k__Viruses_Chao1,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Archaea'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Archaea", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot6)
+if (save_or_not) {
+  reg_pdf1 <- FileCreate(DirPath = paste0(save_path_prefix, "/02.AlphaDiversity/Regression"),
+                         Prefix = "Chao1-Chao1-cross-kingdoms",
+                         Suffix = "pdf")
+  pdf(file = reg_pdf1, height = 7, width = 7)
+  plot(reg_plot0)
+  plot(reg_plot1)
+  plot(reg_plot2)
+  plot(reg_plot3)
+  plot(reg_plot4)
+  plot(reg_plot5)
+  plot(reg_plot6)
+  dev.off()
+}
+```
+
+
+
+
+## Beta Diversity
+
+[ref](https://mp.weixin.qq.com/s?__biz=MzIzMTgwMjk1NQ==&mid=2247484625&idx=2&sn=52ca84ab65b0de9446303e2104582467&chksm=e89fd5f5dfe85ce35fabcb358c21bd9c460e09049b8f8f2874051406b46a37667ec271cae029&scene=21#wechat_redirect)
+
+### PCoA Plot (Response)
+
+```{r pcoa response}
+cal_or_not <- F
+
+if (cal_or_not) {
+  all_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$all$otu_table)), 
+                          group = bICI_ds_list$all$sample_table$Response, 
+                          pcoa_col = respond_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/All"), 
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_ds_list$all$sample_table$Disease)
+  
+  bac_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$k__Bacteria$otu_table)), 
+                          group = bICI_ds_list$k__Bacteria$sample_table$Response, 
+                          pcoa_col = respond_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/Bacteria"), 
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_ds_list$k__Bacteria$sample_table$Disease)
+  
+  euk_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$k__Eukaryota$otu_table)), 
+                          group = bICI_ds_list$k__Eukaryota$sample_table$Response, 
+                          pcoa_col = respond_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/Eukaryota"), 
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_ds_list$k__Eukaryota$sample_table$Disease)
+  
+  vir_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$k__Viruses$otu_table)), 
+                          group = bICI_ds_list$k__Viruses$sample_table$Response, 
+                          pcoa_col = respond_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/Virus"), 
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_ds_list$k__Viruses$sample_table$Disease)
+  
+  arc_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$k__Archaea$otu_table)),
+                          group = bICI_ds_list$k__Archaea$sample_table$Response,
+                          pcoa_col = respond_col, save_or_not = T,
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/Archaea"),
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_ds_list$k__Archaea$sample_table$Disease)
+
+}else{
+  all_pcoa_res <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/All/2022-09-27-PCoA_Response_list-v1.0.rds"))
+  bac_pcoa_res <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/Bacteria/2022-09-27-PCoA_Response_list-v1.0.rds"))
+  vir_pcoa_res <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/Eukaryota/2022-09-27-PCoA_Response_list-v1.0.rds"))
+  vir_pcoa_res <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/Virus/2022-09-27-PCoA_Response_list-v1.0.rds"))
+  arc_pcoa_res <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/Archaea/2022-09-27-PCoA_Response_list-v1.0.rds"))
+}
+
+```
+
+### PCoA Plot (Cancer type)
+
+```{r pcoa cancer}
+cal_or_not <- F
+
+if (cal_or_not) {
+  all_pcoa_can <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$all$otu_table)), 
+                          group = bICI_ds_list$all$sample_table$Disease, 
+                          pcoa_col = cancer_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/All"), 
+                          Prefix = "PCoA_Cancer",
+                          subgroup = bICI_ds_list$all$sample_table$Response)
+  
+  bac_pcoa_can <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$k__Bacteria$otu_table)), 
+                          group = bICI_ds_list$k__Bacteria$sample_table$Disease, 
+                          pcoa_col = cancer_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/Bacteria"), 
+                          Prefix = "PCoA_Cancer",
+                          subgroup = bICI_ds_list$k__Bacteria$sample_table$Response)
+  
+  euk_pcoa_can <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$k__Eukaryota$otu_table)), 
+                          group = bICI_ds_list$k__Eukaryota$sample_table$Disease, 
+                          pcoa_col = cancer_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/Eukaryota"), 
+                          Prefix = "PCoA_Cancer",
+                          subgroup = bICI_ds_list$k__Eukaryota$sample_table$Response)
+  
+  vir_pcoa_can <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$k__Viruses$otu_table)), 
+                          group = bICI_ds_list$k__Viruses$sample_table$Disease, 
+                          pcoa_col = cancer_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/Virus"), 
+                          Prefix = "PCoA_Cancer",
+                          subgroup = bICI_ds_list$k__Viruses$sample_table$Response)
+  
+  arc_pcoa_can <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$k__Archaea$otu_table)),
+                          group = bICI_ds_list$k__Archaea$sample_table$Disease,
+                          pcoa_col = cancer_col, save_or_not = T,
+                          save_path = paste0(save_path_prefix, "/03.BetaDiversity/Archaea"),
+                          Prefix = "PCoA_Cancer",
+                          subgroup = bICI_ds_list$k__Archaea$sample_table$Response)
+
+}else{
+  all_pcoa_can <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/All/2022-09-28-PCoA_Cancer_list-v1.0.rds"))
+  bac_pcoa_can <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/Bacteria/2022-09-28-PCoA_Cancer_list-v1.0.rds"))
+  vir_pcoa_can <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/Eukaryota/2022-09-28-PCoA_Cancer_list-v1.0.rds"))
+  vir_pcoa_can <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/Virus/2022-09-28-zPCoA_Cancer_list-v1.0.rds"))
+  arc_pcoa_can <- readRDS(paste0(save_path_prefix, "/03.BetaDiversity/Archaea/2022-09-28-PCoA_Cancer_list-v1.0.rds"))
+}
+
+```
+
+
+
+### PCoA percent of variation explained
+
+
+```{r PCoA percent of variation explained}
+
+otu_table = as.data.frame(t(bICI_ds_list$all$otu_table))
+
+dist_res <- vegdist(otu_table,method = "bray")
+
+pcoa_res = cmdscale(dist_res, k=20, eig=TRUE) 
+
+# points_res <- as.data.frame(pcoa_res$points) 
+
+# was_res <- wascores(pcoa_res$points, otu_table)
+
+eig_res = pcoa_res$eig
+
+pcoa_contribution <- NULL
+
+for (i in 1:20) {
+  pcoa_contribution[i] <- 100 * eig_res[i]/sum(eig_res)
+}
+
+
+pcoa_contr_mt <- data.frame(contribution = pcoa_contribution,
+                            item = paste0("PCoA ", 1:20 ))
+pcoa_contr_mt$item <- factor(x = pcoa_contr_mt$item, 
+                             levels = pcoa_contr_mt$item)
+
+pcoa_exp_plot <- ggplot(data = pcoa_contr_mt, 
+                        aes(x = item, y = contribution)) + 
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5),
+        axis.title = element_blank())
+pcoa_exp_plot
+
+pcoa_exp_pdf <- FileCreate(DirPath = paste0(save_path_prefix, '03.BetaDiversity/All'),
+                           Prefix = "PCoA-percent-of-variation-explained",
+                           Suffix = "pdf")
+
+pdf(file = pcoa_exp_pdf, width = 5, height = 5)
+plot(pcoa_exp_plot)
+dev.off()
+
+```
+### PCoA matrix for the subset (Revision)
+
+```{r pcoa revision}
+rev_list <- list()
+
+sel_kd <- "k__Bacteria"
+sel_ds <- "MM"
+# sel_coh <- "2017_Frankel"
+
+
+
+tmp_new_group <- unique(tmp_sample_table$new_group)
+
+tmp_adonis_res <- matrix(
+  data = NA, 
+  nrow = length(tax_col), 
+  ncol = length(cancer_col),
+  dimnames = list(
+    names(tax_col),
+    c("MM", "NSCLC", "RCC", "HCC"))) %>% 
+  as.data.frame()
+
+for (sel_ds in colnames(tmp_adonis_res)[4]) {
+  
+  for (sel_kd in rownames(tmp_adonis_res)) {
+    # tmp_sample_table <- bICI_ds_list[[sel_kd]]$sample_table %>%
+    #   filter(Disease == sel_ds)
+    tmp_meta <-  bICI_ds_list[[sel_kd]]$sample_table %>%
+      filter(Disease == sel_ds) 
+    
+    if (length(unique(tmp_meta$Response)) == 1) {
+      next
+    }
+    
+    tmp_otu <- bICI_ds_list[[sel_kd]]$otu_table %>% 
+      t() %>% 
+      as.data.frame() + 0.1
+    tmp_otu <- tmp_otu[rownames(tmp_meta), ]
+    
+    require(matrixTests)
+    
+    tmp_merge <- cbind.data.frame(
+      Group = tmp_meta$Response,
+      tmp_otu
+    )
+    response_otu <- tmp_otu[
+      tmp_meta$Response == 'R',
+    ]
+    noresponse_otu <- tmp_otu[
+      tmp_meta$Response == 'NR',
+    ]
+    tmp_wil_res <- col_wilcoxon_twosample(response_otu, noresponse_otu)
+    
+    tmp_sel_feature <- tmp_wil_res$pvalue <= 0.1
+    tmp_sel_feature[is.na(tmp_sel_feature)] <- F
+    
+    tmp_otu <- tmp_otu[, tmp_sel_feature, drop = F]
+    if (ncol(tmp_otu) <= 10) {
+      next
+    }
+    set.seed(123)
+    dune.div <- adonis2(tmp_otu ~ tmp_meta$Response,
+                        permutations = 999,
+                        method = distance)
+    tmp_adonis_res[sel_kd, sel_ds] <- dune.div$`Pr(>F)`[[1]]
+    tmp_pcoa_res <- My_PCoA(
+      otu_table = tmp_otu,
+      group = tmp_meta$Response,
+      pcoa_col = respond_col,
+      save_or_not = T,
+      save_path = paste0(save_path_prefix, "/10.Revision/BetaDiversity"),
+      Prefix = paste0("PCoA-", sel_ds, "-", sel_kd),
+      subgroup = tmp_meta$Response
+    )
+    
+  }
+}
+
+
+tmp_adonis_res
+
+col_fun <- colorRamp2(log10(c(0.001, 0.01, 0.05, 0.051)), 
+                      c("#E21818", "#FF6B6B", "#FDD2BF", "#070A52"))
+
+
+adonis_hm <- Heatmap(
+  as.matrix(log10(tmp_adonis_res)),
+  cluster_rows = F,
+  cluster_columns = F, 
+  col = col_fun, 
+  rect_gp = gpar(col = "black", lwd = 1),
+  width = unit(ncol(tmp_adonis_res), "cm"),
+  height = unit(nrow(tmp_adonis_res)/2, "cm"),
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    grid.text(sprintf("%.3f", tmp_adonis_res[i, j]), x, y, gp = gpar(fontsize = 8))
+    })
+adonis_hm
+
+
+
+adonis_hm_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "/10.Revision/BetaDiversity"),
+                            Prefix = "adonis_hm_res",
+                            Suffix = "pdf")
+
+pdf(adonis_hm_pdf)
+draw(adonis_hm)
+dev.off()
+
+
+```
+
+<!-- ### PCoA matrix for the subset (Revision) -->
+
+<!-- ```{r pcoa revision} -->
+<!-- rev_list <- list() -->
+
+<!-- # sel_kd <- "k__Bacteria" -->
+<!-- sel_kd <- "k__Eukaryota" -->
+<!-- sel_ds <- "MM" -->
+<!-- sel_coh <- "2017_Frankel" -->
+
+
+<!-- tmp_sample_table <- bICI_ds_list[[sel_kd]]$sample_table %>% -->
+<!-- mutate(new_group = paste0(Cohort_name, "-", Disease)) -->
+
+<!-- tmp_new_group <- unique(tmp_sample_table$new_group) -->
+
+<!-- tmp_adonis_res <- matrix( -->
+<!--   data = NA,  -->
+<!--   nrow = 4,  -->
+<!--   ncol = length(tmp_new_group), -->
+<!--   dimnames = list( -->
+<!--     names(tax_col), -->
+<!--     tmp_new_group)) %>%  -->
+<!--   as.data.frame() -->
+
+<!-- for (tmp_col in colnames(tmp_adonis_res)) { -->
+<!--   tmp_split <- strsplit(x = tmp_col, split = "-") %>% unlist() -->
+<!--   sel_coh <- tmp_split[1] -->
+<!--   sel_ds <- tmp_split[2] -->
+<!--   for (sel_kd in rownames(tmp_adonis_res)) { -->
+<!--     tmp_sample_table <- bICI_ds_list[[sel_kd]]$sample_table %>% -->
+<!--       mutate(new_group = paste0(Cohort_name, "-", Disease)) -->
+<!--     tmp_meta <-  tmp_sample_table%>%  -->
+<!--       filter(Disease == sel_ds, -->
+<!--              Cohort_name == sel_coh) -->
+<!--     if (length(unique(tmp_meta$Response)) == 1) { -->
+<!--       next -->
+<!--     } -->
+
+<!--     tmp_otu <- bICI_ds_list[[sel_kd]]$otu_table %>%  -->
+<!--       t() %>%  -->
+<!--       as.data.frame()  -->
+
+<!--     tmp_sel_feature <- apply( -->
+<!--       tmp_otu, -->
+<!--       2, -->
+<!--       function(x){ -->
+<!--         sum(x == 0)/length(x) < 0.1 -->
+<!--       } -->
+<!--     ) -->
+<!--     tmp_otu <- tmp_otu[rownames(tmp_meta), tmp_sel_feature] -->
+<!--     dune.div <- adonis2(tmp_otu ~ tmp_meta$Response, -->
+<!--                         permutations = 999, -->
+<!--                         method = distance) -->
+<!--     tmp_adonis_res[sel_kd, tmp_col] <- dune.div$`Pr(>F)`[[1]] -->
+
+<!--   } -->
+<!-- } -->
+
+
+<!-- tmp_meta <-  tmp_sample_table%>%  -->
+<!--   filter(Disease == sel_ds, -->
+<!--          Cohort_name == sel_coh) -->
+
+<!-- tmp_otu <- bICI_ds_list[[sel_kd]]$otu_table %>%  -->
+<!--   t() %>%  -->
+<!--   as.data.frame()  -->
+<!-- tmp_otu <- tmp_otu[rownames(tmp_meta), ] -->
+
+
+<!-- set.seed(123) -->
+<!-- dune.div <- adonis2( -->
+<!--   tmp_otu ~ tmp_meta$Response, -->
+<!--   permutations = 999, -->
+<!--   method = distance) -->
+<!-- dune_adonis <- paste0("P-value: ", dune.div$`Pr(>F)`[[1]]) -->
+
+
+
+
+
+
+
+
+
+
+
+<!-- tmp_pcoa_res <- My_PCoA( -->
+<!--   otu_table = tmp_otu, -->
+<!--   group = tmp_meta$Response, -->
+<!--   pcoa_col = respond_col, -->
+<!--   save_or_not = T, -->
+<!--   save_path = paste0(save_path_prefix, "/10.Revision/BetaDiversity"), -->
+<!--   Prefix = paste0("PCoA-", sel_ds, "-", sel_coh, "-", sel_kd), -->
+<!--   subgroup = tmp_meta$Response -->
+<!-- ) -->
+
+
+<!-- all_pcoa_can <- My_PCoA(otu_table = as.data.frame(t(bICI_ds_list$all$otu_table)),  -->
+<!--                         group = bICI_ds_list$all$sample_table$Disease,  -->
+<!--                         pcoa_col = cancer_col, save_or_not = T,  -->
+<!--                         save_path = paste0(save_path_prefix, "/03.BetaDiversity/All"),  -->
+<!--                         Prefix = "PCoA_Cancer", -->
+<!--                         subgroup = bICI_ds_list$all$sample_table$Response) -->
+<!-- ``` -->
+
+## Phylum Composition
+
+### data preparing
+
+```{r phylum composition data preparing}
+group_mt <- bICI_ds_list$all$sample_table[, c("Response", "Disease")]
+
+
+bac_summary <- Phylum_summary(otu = bICI_ds_list$k__Bacteria$taxa_abund$Phylum, 
+                              group = group_mt$Response, 
+                              subgroup = group_mt$Disease,
+                              other = "k__Bacteria|p__Other",
+                              cutoff = 0.05)
+euk_summary <- Phylum_summary(otu = bICI_ds_list$k__Eukaryota$taxa_abund$Phylum, 
+                              group = group_mt$Response, 
+                              subgroup = group_mt$Disease,
+                              other = "k__Eukaryota|p__Other",
+                              cutoff = 0.05)
+arc_summary <- Phylum_summary(otu = bICI_ds_list$k__Archaea$taxa_abund$Phylum, 
+                              group = group_mt$Response, 
+                              subgroup = group_mt$Disease,
+                              other = "k__Archaea|p__Other",
+                              cutoff = 0.05)
+vir_summary <- Phylum_summary(otu = bICI_ds_list$k__Viruses$taxa_abund$Phylum, 
+                              group = group_mt$Response, 
+                              subgroup = group_mt$Disease,
+                              other = "k__Viruses|p__Other",
+                              cutoff = 0.05)
+
+
+```
+
+### Pie plot 
+```{R}
+# combine the data
+comb_summary <- rbind(cbind(Phylum = rep("k__Bacteria", nrow(bac_summary$summary_melt)),
+                            bac_summary$summary_melt),
+                      cbind(Phylum = rep("k__Eukaryota", nrow(euk_summary$summary_melt)),
+                            euk_summary$summary_melt),
+                      cbind(Phylum = rep("k__Archaea", nrow(arc_summary$summary_melt)),
+                            arc_summary$summary_melt),
+                      cbind(Phylum = rep("k__Viruses", nrow(vir_summary$summary_melt)),
+                            vir_summary$summary_melt))
+
+comb_summ_csv <- FileCreate(DirPath = paste0(save_path_prefix, '04.PhylumComposition/'),
+                            Prefix = "Phylym-Composition-Summary",
+                            Suffix = "csv")
+write.csv(x = comb_summary, file = comb_summ_csv)
+
+# set the ranking
+comb_summary$Phylum <- factor(x = comb_summary$Phylum, 
+                              levels = c("k__Bacteria", "k__Eukaryota", 
+                                         "k__Archaea", "k__Viruses"))
+comb_summary$subgroup <- factor(x = comb_summary$subgroup,
+                                levels = c("All", "MM", "NSCLC", "RCC", "HCC"))
+comb_summary$group <- factor(x = comb_summary$group,
+                             levels = c("NR", "All", "R"))
+
+phyl_col <- cbind(`k__Bacteria|p__Bacteroidetes` = "#c30010",
+                  `k__Bacteria|p__Firmicutes` = "#ff2c2c",
+                  `k__Bacteria|p__Proteobacteria` = "#ffcbd1",
+                  `k__Bacteria|p__Other` = "#828385",
+                  `k__Eukaryota|p__Apicomplexa` = "#FFA301",
+                  `k__Eukaryota|p__Ascomycota` = "#FFFD01",
+                  `k__Eukaryota|p__Basidiomycota` = "#FFFF8F",
+                  `k__Eukaryota|p__Other` = "#828385",
+                  `k__Archaea|p__Euryarchaeota` = "#0077b6",
+                  `k__Archaea|p__Candidatus_Thermoplasmatota` = "#00b4d8",
+                  `k__Archaea|p__Other` = "#828385",
+                  `k__Viruses|p__Uroviricota` = "#72cc50",
+                  `k__Viruses|p__Other` = "#828385")
+
+phyl_comp_plot <- ggplot(comb_summary, aes(x = group, y = prop, col = group,
+                                           fill = feature, alpha = group)) +
+  geom_bar(stat = "identity", position="fill", width = 0.9) +
+  coord_polar(theta = "y")+
+  theme_void() +
+  facet_grid(vars(Phylum), vars(subgroup))+ 
+  scale_alpha_manual(values = c(NR = .5, All = 1, R = .5))+
+  xlim(c("", " ", "   ","NR", "All", "R")) + 
+  scale_fill_manual(values = phyl_col) +
+  scale_color_manual(values = c(NR = 'white', All = "black", R = 'white'))
+
+
+phyl_comp_pdf <- FileCreate(DirPath = paste0(save_path_prefix, '04.PhylumComposition/'),
+                            Prefix = "Phylym-Composition",
+                            Suffix = "pdf")
+
+pdf(file = phyl_comp_pdf, width = 10, height = 10)
+plot(phyl_comp_plot + theme(legend.position = "none", strip.text = element_blank()))
+plot(phyl_comp_plot + theme(legend.position = "none"))
+plot(as_ggplot(get_legend(phyl_comp_plot)))
+dev.off()
+
+kingdom_prop <- cbind(t(bICI_ds_list$all$taxa_abund$Kingdom), 
+                      Disease = bICI_ds_list$all$sample_table$Disease) %>%
+  as.data.frame() %>%
+  group_by(Disease) %>%
+  summarise_at(vars(colnames(t(bICI_ds_list$all$taxa_abund$Kingdom))), 
+               function(x) sprintf("%0.2f", mean(as.numeric(x))*100))
+
+kingdom_prop2 <- t(bICI_ds_list$all$taxa_abund$Kingdom) %>%
+  as.data.frame() %>%
+  summarise_at(vars(colnames(t(bICI_ds_list$all$taxa_abund$Kingdom))), 
+               function(x) sprintf("%0.2f", mean(as.numeric(x))*100))
+kingdom_prop2 <- cbind(Disease = "All", kingdom_prop2)
+
+kingdom_prop_c <- rbind(kingdom_prop, kingdom_prop2) %>%
+  as.data.frame()
+
+comb_prop_csv <- FileCreate(DirPath = paste0(save_path_prefix, '04.PhylumComposition/'),
+                            Prefix = "Phylym-Composition-Proportion",
+                            Suffix = "csv")
+write.csv(x = kingdom_prop_c, file = comb_prop_csv)
+
+
+```
+
+
+## Discard
+
+<!---
+
+#### Alpha Diversity & Clinical index
+
+```{r alpha clinical}
+
+cli_reg <- ggplot(data = reg_mt, 
+                  aes(x = k__Bacteria_Chao1,
+                      y = k__Archaea_Chao1, 
+                      col = Response)) + 
+  geom_point(alpha = .5) +
+  geom_smooth(method = "lm") + 
+  theme_classic() + 
+  scale_color_manual(values = respond_col) +
+   stat_fit_glance(method = 'lm',
+                   geom = 'text',
+                   aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                   label.x.npc = 'right', label.y.npc = 0.35, size = 3) + 
+  stat_poly_eq(aes(label = paste(..rr.label..)), 
+               label.x.npc = "right", 
+               parse = TRUE, size = 3)
+
+cli_reg
+
+```
+
+
+##### Chao1
+
+```{r Alpha Clinical Chao1}
+colnames(reg_mt)
+## check which pairs are meaningful
+num_reg_mt <- reg_mt[,c(4, 7, 10, 13, 36, 45, 47, 48)]
+num_reg_mt$RECIST <- as.numeric(num_reg_mt$RECIST)
+num_reg_mt$PFS <- as.numeric(num_reg_mt$PFS)
+
+
+
+num_pair_plot <- ggpairs(num_reg_mt,
+                         columns = c("k__Bacteria_Chao1", "k__Eukaryota_Chao1",
+                                     "k__Archaea_Chao1", "k__Viruses_Chao1",
+                                     "Age", "RECIST", "PFS"),
+                         upper = list(continuous = wrap("cor", method = "spearman", size = 5)),
+                         diag = list(discrete="barDiag", continuous = wrap("densityDiag", alpha=0.3)),
+                         lower = list(continuous = wrap("smooth", alpha = 0.3, size = 0.1)),
+                         mapping = aes(color = Response)) +
+  theme_bw() +
+  scale_color_manual(values = c("#C71E1D", "#015069")) +
+  scale_fill_manual(values = c("#C71E1D", "#015069")) +
+  theme(axis.text.x = element_text(angle = 90))
+
+num_pair_plot[6, 7] <- ggally_text("")
+num_pair_plot[7, 6] <- ggally_text("")
+
+reg_pdf2 <- FileCreate(DirPath = paste0(save_path_prefix, "02.AlphaDiversity/Regression"),
+                       Prefix = "Chao1-clinical-response-cross-kingdoms",
+                       Suffix = "pdf")
+
+pdf(file = reg_pdf2, height = 11, width = 11)
+print(num_pair_plot)
+dev.off()
+
+
+# categorical group 
+
+categ_reg_mt <- reg_mt[,c(4, 7, 10, 13, 35, 37, 38, 41, 45, 49)]
+
+
+categ_reg_melt <- melt(categ_reg_mt, na.rm = T, 
+                       variable.name = "subgroup",
+                       id = c("k__Bacteria_Chao1", "k__Eukaryota_Chao1",
+                              "k__Archaea_Chao1", "k__Viruses_Chao1",
+                              "Response", "Disease"))
+categ_reg_melt <- categ_reg_melt[categ_reg_melt$value != "", ]
+
+for (sg in as.character(unique(categ_reg_melt$subgroup))) {
+  box_pdf <- FileCreate(DirPath =  paste0(save_path_prefix, "02.AlphaDiversity/Categorical"),
+                        Prefix = paste0("Boxplot-Chao1-", sg), Suffix = "pdf")
+  pdf(file = box_pdf, 
+      width = length(unique(categ_reg_melt$value[categ_reg_melt$subgroup==sg]))*5, 
+      height = length(unique(categ_reg_melt$Disease[categ_reg_melt$subgroup==sg]))*5)
+  for (sub_Chao1 in c("k__Bacteria_Chao1", "k__Eukaryota_Chao1",
+                      "k__Archaea_Chao1", "k__Viruses_Chao1")) {
+    my_box <- ggplot(data = categ_reg_melt %>% 
+                       subset(subgroup == sg),
+                     aes(x = Response, y = .data[[sub_Chao1]], col = Response)) + 
+      facet_grid(Disease~value) +
+      stat_boxplot(geom = "errorbar",width=.15) + 
+      geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) + 
+      geom_jitter(alpha = 0.3, width = .3) +
+      scale_color_manual(values = respond_col) +
+      stat_compare_means(comparisons = list(c("NR", "R")), 
+                         size = 7, label = format("p.format" , scientific = T)) +
+      theme_bw() +
+      theme(legend.position = 'none', )+ 
+      labs(title = paste0("Boxplot ", sub_Chao1, " in ", sg, " comparison"))
+    plot(my_box)
+    plot(my_box + theme(text = element_blank()))
+  }
+  dev.off()
+}
+
+
+```
+
+
+##### Shannon
+
+```{r Alpha Clinical Shannon}
+colnames(reg_mt)
+## check which pairs are meaningful
+num_reg_mt <- reg_mt[,c(5, 8, 11, 14, 36, 45, 47, 48)]
+num_reg_mt$RECIST <- as.numeric(num_reg_mt$RECIST)
+num_reg_mt$PFS <- as.numeric(num_reg_mt$PFS)
+
+
+
+num_pair_plot <- ggpairs(num_reg_mt,
+                         columns = c("k__Bacteria_Shannon", "k__Eukaryota_Shannon",
+                                     "k__Archaea_Shannon", "k__Viruses_Shannon",
+                                     "Age", "RECIST", "PFS"),
+                         upper = list(continuous = wrap("cor", method = "spearman", size = 5)),
+                         diag = list(discrete="barDiag", continuous = wrap("densityDiag", alpha=0.3)),
+                         lower = list(continuous = wrap("smooth", alpha = 0.3, size = 0.1)),
+                         mapping = aes(color = Response)) +
+  theme_bw() +
+  scale_color_manual(values = c("#C71E1D", "#015069")) +
+  scale_fill_manual(values = c("#C71E1D", "#015069")) +
+  theme(axis.text.x = element_text(angle = 90))
+
+num_pair_plot[6, 7] <- ggally_text("")
+num_pair_plot[7, 6] <- ggally_text("")
+
+reg_pdf2 <- FileCreate(DirPath = paste0(save_path_prefix, "02.AlphaDiversity/Regression"),
+                       Prefix = "Shannon-clinical-response-cross-kingdoms",
+                       Suffix = "pdf")
+
+pdf(file = reg_pdf2, height = 11, width = 11)
+print(num_pair_plot)
+dev.off()
+
+
+# categorical group 
+
+categ_reg_mt <- reg_mt[,c(5, 8, 11, 14, 35, 37, 38, 41, 45, 49)]
+
+
+categ_reg_melt <- melt(categ_reg_mt, na.rm = T, 
+                       variable.name = "subgroup",
+                       id = c("k__Bacteria_Shannon", "k__Eukaryota_Shannon",
+                              "k__Archaea_Shannon", "k__Viruses_Shannon",
+                              "Response", "Disease"))
+categ_reg_melt <- categ_reg_melt[categ_reg_melt$value != "", ]
+
+for (sg in as.character(unique(categ_reg_melt$subgroup))) {
+  box_pdf <- FileCreate(DirPath =  paste0(save_path_prefix, "02.AlphaDiversity/Categorical"),
+                        Prefix = paste0("Boxplot-Shannon-", sg), Suffix = "pdf")
+  pdf(file = box_pdf, 
+      width = length(unique(categ_reg_melt$value[categ_reg_melt$subgroup==sg]))*5, 
+      height = length(unique(categ_reg_melt$Disease[categ_reg_melt$subgroup==sg]))*5)
+  for (sub_Shannon in c("k__Bacteria_Shannon", "k__Eukaryota_Shannon",
+                      "k__Archaea_Shannon", "k__Viruses_Shannon")) {
+    my_box <- ggplot(data = categ_reg_melt %>% 
+                       subset(subgroup == sg),
+                     aes(x = Response, y = .data[[sub_Shannon]], col = Response)) + 
+      facet_grid(Disease~value) +
+      stat_boxplot(geom = "errorbar",width=.15) + 
+      geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) + 
+      geom_jitter(alpha = 0.3, width = .3) +
+      scale_color_manual(values = respond_col) +
+      stat_compare_means(comparisons = list(c("NR", "R")), 
+                         size = 7, label = format("p.format" , scientific = T)) +
+      theme_bw() +
+      theme(legend.position = 'none', )+ 
+      labs(title = paste0("Boxplot ", sub_Shannon, " in ", sg, " comparison"))
+    plot(my_box)
+    plot(my_box + theme(text = element_blank()))
+  }
+  dev.off()
+}
+
+
+```
+
+##### Shannon index
+
+```{r Shannon}
+save_or_not <- F
+alpha_idx <- "Shannon"
+reg_plot0 <- ggscatterstats(data = reg_mt, 
+                            x = All_Shannon, 
+                            xlab = "Shannon",
+                            y = align_num,
+                            ylab = "Alignments num",
+                            type = "spearman", 
+                            xfill = "#D8A7B1",
+                            yfill = "#B6E2D3",
+                            title = paste0("Relationship between ", 
+                                           "Shannon index and alignment reads number"))
+
+plot(reg_plot0)
+reg_plot1 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Shannon,
+                            xlab = "Bacteria",
+                            y = k__Eukaryota_Shannon,
+                            ylab = "Eukaryota",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Eukaryota'],
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Eukaryota', " in ", alpha_idx))
+plot(reg_plot1)
+reg_plot2 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Shannon,
+                            xlab = "Bacteria",
+                            y = k__Archaea_Shannon,
+                            ylab = "Archaea",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Archaea'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Archaea', " in ", alpha_idx))
+plot(reg_plot2)
+reg_plot3 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Shannon,
+                            xlab = "Bacteria",
+                            y = k__Viruses_Shannon,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot3)
+reg_plot4 <- ggscatterstats(data = reg_mt, 
+                            x = k__Eukaryota_Shannon,
+                            xlab = "Eukaryota",
+                            y = k__Archaea_Shannon,
+                            ylab = "Archaea",
+                            type = "spearman",
+                            xfill = tax_col['k__Eukaryota'],
+                            yfill = tax_col['k__Archaea'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Eukaryota", " & ",
+                                           'Archaea', " in ", alpha_idx))
+plot(reg_plot4)
+reg_plot5 <- ggscatterstats(data = reg_mt, 
+                            x = k__Eukaryota_Shannon,
+                            xlab = "Eukaryota",
+                            y = k__Viruses_Shannon,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Eukaryota'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Eukaryota", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot5)
+reg_plot6 <- ggscatterstats(data = reg_mt, 
+                            x = k__Archaea_Shannon,
+                            xlab = "Archaea",
+                            y = k__Viruses_Shannon,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Archaea'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Archaea", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot6)
+if (save_or_not) {
+  reg_pdf1 <- FileCreate(DirPath = paste0(save_path_prefix, "/02.AlphaDiversity/Regression"),
+                         Prefix = "Shannon-Shannon-cross-kingdoms",
+                         Suffix = "pdf")
+  pdf(file = reg_pdf1, height = 7, width = 7)
+  plot(reg_plot0)
+  plot(reg_plot1)
+  plot(reg_plot2)
+  plot(reg_plot3)
+  plot(reg_plot4)
+  plot(reg_plot5)
+  plot(reg_plot6)
+  dev.off()
+}
+```
+
+
+##### Simpson index
+
+```{r Simpson}
+save_or_not <- F
+alpha_idx <- "Simpson"
+reg_plot0 <- ggscatterstats(data = reg_mt, 
+                            x = All_Simpson, 
+                            xlab = "Simpson",
+                            y = align_num,
+                            ylab = "Alignments num",
+                            type = "spearman", 
+                            xfill = "#D8A7B1",
+                            yfill = "#B6E2D3",
+                            title = paste0("Relationship between ", 
+                                           "Simpson index and alignment reads number"))
+
+plot(reg_plot0)
+reg_plot1 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Simpson,
+                            xlab = "Bacteria",
+                            y = k__Eukaryota_Simpson,
+                            ylab = "Eukaryota",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Eukaryota'],
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Eukaryota', " in ", alpha_idx))
+plot(reg_plot1)
+reg_plot2 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Simpson,
+                            xlab = "Bacteria",
+                            y = k__Archaea_Simpson,
+                            ylab = "Archaea",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Archaea'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Archaea', " in ", alpha_idx))
+plot(reg_plot2)
+reg_plot3 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Simpson,
+                            xlab = "Bacteria",
+                            y = k__Viruses_Simpson,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot3)
+reg_plot4 <- ggscatterstats(data = reg_mt, 
+                            x = k__Eukaryota_Simpson,
+                            xlab = "Eukaryota",
+                            y = k__Archaea_Simpson,
+                            ylab = "Archaea",
+                            type = "spearman",
+                            xfill = tax_col['k__Eukaryota'],
+                            yfill = tax_col['k__Archaea'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Eukaryota", " & ",
+                                           'Archaea', " in ", alpha_idx))
+plot(reg_plot4)
+reg_plot5 <- ggscatterstats(data = reg_mt, 
+                            x = k__Eukaryota_Simpson,
+                            xlab = "Eukaryota",
+                            y = k__Viruses_Simpson,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Eukaryota'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Eukaryota", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot5)
+reg_plot6 <- ggscatterstats(data = reg_mt, 
+                            x = k__Archaea_Simpson,
+                            xlab = "Archaea",
+                            y = k__Viruses_Simpson,
+                            ylab = "Viruses",
+                            type = "spearman",
+                            xfill = tax_col['k__Archaea'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Archaea", " & ",
+                                           'Viruses', " in ", alpha_idx))
+plot(reg_plot6)
+if (save_or_not) {
+  reg_pdf1 <- FileCreate(DirPath = paste0(save_path_prefix, "/02.AlphaDiversity/Regression"),
+                         Prefix = "Simpson-Simpson-cross-kingdoms",
+                         Suffix = "pdf")
+  pdf(file = reg_pdf1, height = 7, width = 7)
+  plot(reg_plot0)
+  plot(reg_plot1)
+  plot(reg_plot2)
+  plot(reg_plot3)
+  plot(reg_plot4)
+  plot(reg_plot5)
+  plot(reg_plot6)
+  dev.off()
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+### test
+
+```{r test}
+test_boxplot <- ggplot(data = bICI_kingdom_df,
+                       aes(x = Response, y = k__Viruses/k__Eukaryota, col = Response)) +
+    stat_boxplot(geom = "errorbar",width=.15) + 
+    geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+    scale_y_continuous(trans='atanh') +
+    geom_jitter(alpha = 0.3, width = .3) +
+    scale_color_manual(values = respond_col) + 
+    stat_compare_means(comparisons = list(c("NR", "R")), 
+                       size = 6, label = format("p.format" , scientific = T)) +
+    theme_bw() +
+    theme(legend.position = 'none')
+plot(test_boxplot)
+test_boxplot2_1 <- ggplot(data = bICI_kingdom_df,
+                       aes(x = Response, y = k__Eukaryota/k__Bacteria , col = Response)) +
+    facet_wrap(~Disease, nrow = 1) +
+    stat_boxplot(geom = "errorbar",width=.15) + 
+    geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+    scale_y_continuous(trans='atanh') +
+    geom_jitter(alpha = 0.3, width = .3) +
+    scale_color_manual(values = respond_col) + 
+    stat_compare_means(comparisons = list(c("NR", "R")), 
+                       size = 6, label = format("p.format" , scientific = T)) +
+    theme_bw() +
+    theme(legend.position = 'none')
+plot(test_boxplot2_1)
+test_boxplot2_2 <- ggplot(data = bICI_kingdom_df,
+                       aes(x = Response, y = k__Archaea/k__Bacteria, col = Response)) +
+    facet_wrap(~Disease, nrow = 1) +
+    stat_boxplot(geom = "errorbar",width=.15) + 
+    geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+    scale_y_continuous(trans='atanh') +
+    geom_jitter(alpha = 0.3, width = .3) +
+    scale_color_manual(values = respond_col) + 
+    stat_compare_means(comparisons = list(c("NR", "R")), 
+                       size = 6, label = format("p.format" , scientific = T)) +
+    theme_bw() +
+    theme(legend.position = 'none')
+plot(test_boxplot2_2)
+test_boxplot2_3 <- ggplot(data = bICI_kingdom_df,
+                       aes(x = Response, y = k__Viruses/k__Bacteria, col = Response)) +
+    facet_wrap(~Disease, nrow = 1) +
+    stat_boxplot(geom = "errorbar",width=.15) + 
+    geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+    scale_y_continuous(trans='atanh') +
+    geom_jitter(alpha = 0.3, width = .3) +
+    scale_color_manual(values = respond_col) + 
+    stat_compare_means(comparisons = list(c("NR", "R")), 
+                       size = 6, label = format("p.format" , scientific = T)) +
+    theme_bw() +
+    theme(legend.position = 'none')
+plot(test_boxplot2_3)
+test_boxplot2_4 <- ggplot(data = bICI_kingdom_df,
+                       aes(x = Response, y = k__Archaea/k__Eukaryota, col = Response)) +
+    facet_wrap(~Disease, nrow = 1) +
+    stat_boxplot(geom = "errorbar",width=.15) + 
+    geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+    scale_y_continuous(trans='atanh') +
+    geom_jitter(alpha = 0.3, width = .3) +
+    scale_color_manual(values = respond_col) + 
+    stat_compare_means(comparisons = list(c("NR", "R")), 
+                       size = 6, label = format("p.format" , scientific = T)) +
+    theme_bw() +
+    theme(legend.position = 'none')
+plot(test_boxplot2_4)
+test_boxplot2_5 <- ggplot(data = bICI_kingdom_df,
+                       aes(x = Response, y = k__Viruses/k__Eukaryota, col = Response)) +
+    facet_wrap(~Disease, nrow = 1) +
+    stat_boxplot(geom = "errorbar",width=.15) + 
+    geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+    scale_y_continuous(trans='atanh') +
+    geom_jitter(alpha = 0.3, width = .3) +
+    scale_color_manual(values = respond_col) + 
+    stat_compare_means(comparisons = list(c("NR", "R")), 
+                       size = 6, label = format("p.format" , scientific = T)) +
+    theme_bw() +
+    theme(legend.position = 'none')
+plot(test_boxplot2_5)
+test_boxplot2_6 <- ggplot(data = bICI_kingdom_df,
+                       aes(x = Response, y = k__Archaea/k__Viruses, col = Response)) +
+    facet_wrap(~Disease, nrow = 1) +
+    stat_boxplot(geom = "errorbar",width=.15) + 
+    geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+    scale_y_continuous(trans='atanh') +
+    geom_jitter(alpha = 0.3, width = .3) +
+    scale_color_manual(values = respond_col) + 
+    stat_compare_means(comparisons = list(c("NR", "R")), 
+                       size = 6, label = format("p.format" , scientific = T)) +
+    theme_bw() +
+    theme(legend.position = 'none')
+plot(test_boxplot2_6)
+
+```
+
+
+### test2
+
+```{r test2}
+test_bac <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$bac_criteria == 'keep',] %>% 
+                         subset(Disease == "NSCLC"),
+                      aes(x = Response, y = k__Bacteria, col = Response)) +
+  facet_wrap(~Antibiotics) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+test_euk <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$euk_criteria == 'keep',] %>% 
+                         subset(Disease == "NSCLC"),
+                      aes(x = Response, y = k__Eukaryota, col = Response)) +
+  facet_wrap(~Antibiotics, nrow = 1) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+test_arc <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$arc_criteria == 'keep',] %>% 
+                         subset(Disease == "NSCLC"),
+                      aes(x = Response, y = k__Archaea, col = Response)) +
+  facet_wrap(~Antibiotics, nrow = 1) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+test_vir <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$vir_criteria == 'keep',] %>% 
+                         subset(Disease == "NSCLC"),
+                      aes(x = Response, y = k__Viruses, col = Response)) +
+  facet_wrap(~Antibiotics, nrow = 1) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+```
+
+### test3 
+
+```{r test3}
+test_bac <- ggplot(data = bICI_kingdom_df[bICI_kingdom_df$bac_criteria == 'keep',],
+                   aes(x = Response, y = k__Bacteria, col = Response)) +
+  facet_wrap(~Sequencing_platform) +
+  stat_boxplot(geom = "errorbar",width=.15) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) +
+  scale_y_continuous(trans='logit') +
+  geom_jitter(alpha = 0.3, width = .3) +
+  scale_color_manual(values = respond_col) + 
+  stat_compare_means(comparisons = list(c("NR", "R")), 
+                     size = 6, label = format("p.format" , scientific = T)) +
+  theme_bw() +
+  theme(legend.position = 'none')
+
+```
+
+## Discard
+
+```{r discard}
+criteria_sample_info <- dataset$sample_table
+for (sel_k in kingdom_list) {
+  tmp_sum <- raw_data_list[[sel_k]]$sample_sums()
+  tmp_df <- data.frame(var1 = tmp_sum,
+                       var2 = ifelse(tmp_sum >= kingdom_cutoff[sel_k], "keep", "discard"))
+  colnames(tmp_df) <- paste0(sel_k, c("_size", "_label"))
+  criteria_sample_info <- merge(criteria_sample_info, tmp_df, by = 'row.names')
+  rownames(criteria_sample_info) <- criteria_sample_info$Row.names
+  criteria_sample_info <- criteria_sample_info[, -1]
+} 
+
+chi_plot <- ggbarstats(
+  data = criteria_sample_info,
+  x = bac_label, 
+  y = Response) +
+  labs(caption = NULL) +
+  scale_fill_manual(values = c(keep = "#1C9E77",
+                               discard = "grey"))
+
+chi_plot <- ggbarstats(
+  data = criteria_sample_info,
+  x = bac_label, 
+  y = Cohort_name) +
+  labs(caption = NULL) +
+  scale_fill_manual(values = c(keep = "#1C9E77",
+                               discard = "grey"))
+```
+
+
+  
+  
+```{r }  
+  sample_size_cutoff = 5
+  # use 8,000,000 sequences in each sample
+  dataset$rarefy_samples(rngseed = 000, sample.size = sample_size_cutoff*1000000)
+  # 64 samples removed, because they contained fewer reads than `sample.size`.
+  # 1901 OTUs were removed because they are no longer present in any sample after random subsampling ...
+  # 1901 taxa are removed from the otu_table, as the abundance is 0 ...
+  
+  dataset$tidy_dataset()
+  
+  # calculate relative abundance
+  dataset$cal_abund()
+  
+  # calculate alpha diversity
+  dataset$cal_alphadiv(PD = FALSE)
+  
+  # rename the asv
+  dataset$rename_taxa(newname_prefix = "ASV_")
+  
+  dataset_rds <- FileCreate(DirPath = paste0(save_path_prefix, "00.RawData/R6"),
+                            Prefix = paste0("dataset-", 
+                                            length(dataset$sample_names()), "S-", 
+                                            sample_size_cutoff, "M"), 
+                            Suffix = "rds")
+  
+  saveRDS(object = dataset, file = dataset_rds)
+
+
+dataset$sample_sums() %>% range
+# [1] 8e+06 8e+06
+
+print(dataset)
+# microtable-class object:
+# sample_table have 1354 rows and 26 columns
+# otu_table have 46061 rows and 1354 columns
+# tax_table have 46061 rows and 7 columns
+# Taxa abundance: calculated for Kingdom,Phylum,Class,Order,Family,Genus,Species 
+# Alpha diversity: calculated for Observed,Chao1,se.chao1,ACE,se.ACE,Shannon,Simpson,InvSimpson,Fisher 
+
+```
+
+## rarefaction curve by `Qiime2`
+
+```{r rarefaction}
+
+
+```
+
+## Separate data
+
+### before ICI, paired ICI, independent sample.
+
+-   before ICI (`bICI`): the samples were collected before ICI.
+
+    -   888 samples from 888 patients.
+
+-   paired ICI (`pICI`): the samples were collected before ICI and existed subsequent paired ICI treatment samples.
+
+    -   196 samples from 64 patients.
+
+    -   196 samples included 64 from before ICI, which means that 64 samples overlap between `bICI` and `pICI`.
+
+-   independent sample (`iICI`): independent samples without before ICI.
+
+    -   contained 2 type:
+
+        1.  after ICI treatment.
+
+        -   without paired sample collected before ICI.
+
+        2.  FMT samples
+
+        -   before FMT treatment.
+
+        -   FMT treatment donor.
+
+        -   after FMT treatment.
+
+```{r Subset ICI}
+separate_again <- F
+
+
+if (separate_again) {
+  bICI_dataset <- clone(dataset)
+  bICI_dataset$sample_table %<>% subset(Period == "Before_ICI")
+  bICI_dataset$tidy_dataset() 
+  print(bICI_dataset)
+  # microtable-class object:
+  # sample_table have 888 rows and 26 columns
+  # otu_table have 44434 rows and 888 columns
+  # tax_table have 44434 rows and 7 columns
+  # Taxa abundance: calculated for Kingdom,Phylum,Class,Order,Family,Genus,Species 
+  # Alpha diversity: calculated for Observed,Chao1,se.chao1,ACE,se.ACE,Shannon,Simpson,InvSimpson,Fisher 
+  sample_size_cutoff = 8
+  bICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "00.RawData/R6"),
+                         Prefix = paste0("before_ICI_dataset-", 
+                                         length(bICI_dataset$sample_names()), "S-", 
+                                         length(unique(bICI_dataset$sample_table$Patient_ID)), "P-",
+                                         sample_size_cutoff, "M"), 
+                         Suffix = "rds")
+  
+  saveRDS(object = bICI_dataset, file = bICI_rds)
+  
+  # exclude the before ICI sample
+  pat_Freq <- table(dataset$sample_table$Patient_ID,
+                    dataset$sample_table$Period) %>%
+    as.matrix() %>% as.data.frame()
+  pat_cast <- acast(pat_Freq, Var1 ~ Var2) %>% as.data.frame()
+  
+  ## paired samples
+  pICI_dataset <- clone(dataset)
+  paired_patient <- pat_cast[pat_cast$Before_ICI >= 1 & rowSums(pat_cast[, -2]) >= 1, ]
+  message(sum(paired_patient)," paired samples number from ", nrow(paired_patient), " patients.")
+  pICI_dataset$sample_table %<>% subset(Patient_ID %in% rownames(paired_patient))
+  pICI_dataset$tidy_dataset() 
+  print(pICI_dataset)
+  pICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "00.RawData/R6"),
+                         Prefix = paste0("pICI_dataset-", 
+                                         length(pICI_dataset$sample_names()), "S-", 
+                                         length(unique(pICI_dataset$sample_table$Patient_ID)), "P-",
+                                         sample_size_cutoff, "M"), 
+                         Suffix = "rds")
+  
+  saveRDS(object = pICI_dataset, file = pICI_rds)
+  
+  
+  ## independent samples (FMT or after ICI)
+  iICI_dataset <- clone(dataset)
+  ind_patient <- pat_cast[pat_cast$Before_ICI == 0 & rowSums(pat_cast[, -2]) >= 1, ]
+  message(sum(ind_patient)," independent samples number from ", nrow(ind_patient), " patients (FMT or after ICI).")
+  iICI_dataset$sample_table %<>% subset(Patient_ID %in% rownames(ind_patient))
+  iICI_dataset$tidy_dataset() 
+  print(iICI_dataset)
+  iICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "00.RawData/R6"),
+                         Prefix = paste0("iICI_dataset-", 
+                                         length(iICI_dataset$sample_names()), "S-", 
+                                         length(unique(iICI_dataset$sample_table$Patient_ID)), "P-",
+                                         sample_size_cutoff, "M"), 
+                         Suffix = "rds")
+  
+  saveRDS(object = iICI_dataset, file = iICI_rds)
+  
+}else{
+  bICI_dataset <- readRDS(file = paste0(save_path_prefix, "00.RawData/R6/2022-07-15-before_ICI_dataset-888S-888P-8M-v1.0.rds"))
+  iICI_dataset <- readRDS(file = paste0(save_path_prefix, "00.RawData/R6/2022-07-15-iICI_dataset-334S-132P-8M-v1.0.rds"))
+  pICI_dataset <- readRDS(file = paste0(save_path_prefix, "00.RawData/R6/2022-07-18-pICI_dataset-196S-64P-8M-v1.0.rds"))
+}
+```
+
+
+### Taxonomy 
+
+```{r taxonomy separate}
+separate_again <- F
+
+if (condition) {
+  bICI_list <- TaxSep(import_ds = bICI_dataset$clone())
+  iICI_list <- TaxSep(import_ds = iICI_dataset$clone())
+  pICI_list <- TaxSep(import_ds = pICI_dataset$clone())
+  
+  bICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "00.RawData/rds"),
+                         Prefix = "bICI_list", Suffix = "rds")
+  iICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "00.RawData/rds"),
+                         Prefix = "iICI_list", Suffix = "rds")
+  pICI_rds <- FileCreate(DirPath = paste0(save_path_prefix, "00.RawData/rds"),
+                         Prefix = "pICI_list", Suffix = "rds")
+  saveRDS(object = bICI_list, file = bICI_rds)
+  saveRDS(object = iICI_list, file = iICI_rds)
+  saveRDS(object = pICI_list, file = pICI_rds)
+}else{
+  bICI_list <- readRDS(file = paste0(save_path_prefix, "00.RawData/rds/2022-07-27-bICI_list-v1.0.rds"))
+  iICI_list <- readRDS(file = paste0(save_path_prefix, "00.RawData/rds/2022-07-27-iICI_list-v1.0.rds"))
+  pICI_list <- readRDS(file = paste0(save_path_prefix, "00.RawData/rds/2022-07-27-pICI_list-v1.0.rds"))
+}
+
+```
+
+
+
+
+## Alpha diversity 
+  
+### Box plot
+
+```{r alpha diversity}
+## all taxonomy combine
+all_alpha <- cbind(bICI_dataset$alpha_diversity, bICI_dataset$sample_table)
+bICI_all_alpha <- Alpha_boxplot(alpha_mt = all_alpha, save_or_not = F,
+                                save_path = paste0(save_path_prefix, "/01.AlphaDiversity/All"))
+
+## Bacteria
+bac_alpha <- cbind(bICI_list$k__Bacteria$alpha_diversity, bICI_list$k__Bacteria$sample_table)
+bICI_bac_alpha <- Alpha_boxplot(alpha_mt = bac_alpha, save_or_not = F,
+                                save_path = paste0(save_path_prefix, "/01.AlphaDiversity/Bacteria"))
+
+## Eukaryota
+euk_alpha <- cbind(bICI_list$k__Eukaryota$alpha_diversity, bICI_list$k__Eukaryota$sample_table)
+bICI_euk_alpha <- Alpha_boxplot(alpha_mt = euk_alpha, save_or_not = F,
+                                save_path = paste0(save_path_prefix, "/01.AlphaDiversity/Eukaryota"))
+
+
+## Archaea
+arc_alpha <- cbind(bICI_list$k__Archaea$alpha_diversity, bICI_list$k__Archaea$sample_table)
+bICI_arc_alpha <- Alpha_boxplot(alpha_mt = arc_alpha, save_or_not = F,
+                                save_path = paste0(save_path_prefix, "/01.AlphaDiversity/Archaea"))
+
+
+## Virus
+vir_alpha <- cbind(bICI_list$k__Viruses$alpha_diversity, bICI_list$k__Viruses$sample_table)
+bICI_vir_alpha <- Alpha_boxplot(alpha_mt = vir_alpha, save_or_not = F,
+                                save_path = paste0(save_path_prefix, "/01.AlphaDiversity/Virus"))
+```
+
+### Regression
+
+  - cross kingdoms
+    
+  - alpha diversity & clinical index
+    
+[ref](https://zhuanlan.zhihu.com/p/165626910)
+
+#### Establish the matrix
+
+```{r cross kingdoms}
+reg_mt <- cbind(all_alpha[,c(2, 6, 7)],
+                bac_alpha[,c(2, 6, 7)],
+                euk_alpha[,c(2, 6, 7)],
+                arc_alpha[,c(2, 6, 7)],
+                vir_alpha[,c(2, 6, 7)])
+colnames(reg_mt) <- paste0(rep(c("All", "k__Bacteria", 
+                                 "k__Eukaryota", "k__Archaea", 
+                                 "k__Viruses"), each = 3),
+                           rep(c("_Chao1", "_Shannon", "_Simpson"), 5))
+
+reg_mt <- cbind(reg_mt, bICI_dataset$sample_table)
+
+tax_combn <- combn(names(tax_col)[1:3], 2)
+
+# 
+# reg_plot <- ggscatterstats(data = reg_mt, 
+#                            x = k__Bacteria_Chao1,
+#                            y = k__Eukaryota_Chao1,
+#                            # point.args = list(col = ifelse(reg_mt$Response == "R", "gray", "green")),
+#                            type = "spearman",
+#                            centrality.plotting = "mean",
+#                            xfill = tax_col['k__Bacteria'],
+#                            yfill = tax_col['k__Eukaryota'],
+#                            marginal.type = "histogram",  
+#                            title = paste0("Relationship between ", 
+#                                           "Bacteria", " & ",
+#                                           'Eukaryota', " in ", alpha_idx))
+```
+
+#### Cross-kingdoms Chao1-Chao1
+
+```{r chao1-caho1}
+save_or_not <- F
+
+reg_plot1 <- ggscatterstats(data = reg_mt, 
+                               x = k__Bacteria_Chao1,
+                               y = k__Eukaryota_Chao1,
+                               type = "spearman",
+                               xfill = tax_col['k__Bacteria'],
+                               yfill = tax_col['k__Eukaryota'],
+                               marginal.type = "histogram",  
+                               title = paste0("Relationship between ", 
+                                              "Bacteria", " & ",
+                                              'Eukaryota', " in ", alpha_idx))
+
+
+reg_plot2 <- ggscatterstats(data = reg_mt, 
+                               x = k__Bacteria_Chao1,
+                               y = k__Archaea_Chao1,
+                               type = "spearman",
+                               xfill = tax_col['k__Bacteria'],
+                               yfill = tax_col['k__Archaea'],
+                               marginal.type = "histogram",  
+                               title = paste0("Relationship between ", 
+                                              "Bacteria", " & ",
+                                              'Archaea', " in ", alpha_idx))
+
+
+reg_plot3 <- ggscatterstats(data = reg_mt, 
+                               x = k__Bacteria_Chao1,
+                               y = k__Viruses_Chao1,
+                               type = "spearman",
+                               xfill = tax_col['k__Bacteria'],
+                               yfill = tax_col['k__Viruses'],
+                               marginal.type = "histogram",  
+                               title = paste0("Relationship between ", 
+                                              "Bacteria", " & ",
+                                              'Viruses', " in ", alpha_idx))
+
+
+reg_plot4 <- ggscatterstats(data = reg_mt, 
+                               x = k__Eukaryota_Chao1,
+                               y = k__Archaea_Chao1,
+                               type = "spearman",
+                               xfill = tax_col['k__Eukaryota'],
+                               yfill = tax_col['k__Archaea'],
+                               marginal.type = "histogram",  
+                               title = paste0("Relationship between ", 
+                                              "Eukaryota", " & ",
+                                              'Archaea', " in ", alpha_idx))
+
+
+reg_plot5 <- ggscatterstats(data = reg_mt, 
+                               x = k__Eukaryota_Chao1,
+                               y = k__Viruses_Chao1,
+                               type = "spearman",
+                               xfill = tax_col['k__Eukaryota'],
+                               yfill = tax_col['k__Viruses'],
+                               marginal.type = "histogram",  
+                               title = paste0("Relationship between ", 
+                                              "Eukaryota", " & ",
+                                              'Viruses', " in ", alpha_idx))
+
+
+reg_plot6 <- ggscatterstats(data = reg_mt, 
+                               x = k__Archaea_Chao1,
+                               y = k__Viruses_Chao1,
+                               type = "spearman",
+                               xfill = tax_col['k__Archaea'],
+                               yfill = tax_col['k__Viruses'],
+                               marginal.type = "histogram",  
+                               title = paste0("Relationship between ", 
+                                              "Archaea", " & ",
+                                              'Viruses', " in ", alpha_idx))
+
+if (save_or_not) {
+  reg_pdf1 <- FileCreate(DirPath = paste0(save_path_prefix, "/01.AlphaDiversity/Regression"),
+                         Prefix = "Chao1-Chao1-cross-kingdoms",
+                         Suffix = "pdf")
+  
+  pdf(file = reg_pdf1, height = 7, width = 7)
+  plot(reg_plot1)
+  plot(reg_plot2)
+  plot(reg_plot3)
+  plot(reg_plot4)
+  plot(reg_plot5)
+  plot(reg_plot6)
+  dev.off()
+}
+
+
+```
+
+#### Kingdoms Chao1 & clinical index
+
+```{r chao1 clinical index}
+
+colnames(reg_mt)
+#  [1] "All_Chao1"            "All_Shannon"          "All_Simpson"          "k__Bacteria_Chao1"    "k__Bacteria_Shannon"  "k__Bacteria_Simpson" 
+#  [7] "k__Eukaryota_Chao1"   "k__Eukaryota_Shannon" "k__Eukaryota_Simpson" "k__Archaea_Chao1"     "k__Archaea_Shannon"   "k__Archaea_Simpson"  
+# [13] "k__Viruses_Chao1"     "k__Viruses_Shannon"   "k__Viruses_Simpson"   "SampleID"             "SampleID2"            "Patient_ID"          
+# [19] "Access_ID"            "Period"               "Cohort_name"          "Subject_ID"           "PMID"                 "Antibiotics"         
+# [25] "Age"                  "Gender"               "Country"              "Continent"            "Body_site"            "Disease"             
+# [31] "AJCC"                 "ICI"                  "ICI_detail"           "Response"             "Respond_detail"       "RECIST"              
+# [37] "PFS"                  "PFS_status"           "Seq_type"             "Sequencing_platform"  "DNA_extraction_kit"  
+
+# 
+## check which pairs are meaningful
+num_reg_mt <- reg_mt[,c(4, 7, 10, 13, 25, 36, 37)]
+num_reg_mt$RECIST <- as.numeric(num_reg_mt$RECIST)
+reg_res_rcorr <- rcorr(as.matrix(num_reg_mt[reg_mt$Response == "R", ]), type = 'spearman')
+
+
+corr_plot <- ggcorr(num_reg_mt,
+                    nbreaks = 6,
+                    low = "steelblue",
+                    mid = "white",
+                    high = "darkred",
+                    geom = "circle")
+
+
+num_pair_plot <- ggpairs(reg_mt,
+                         columns = c("k__Bacteria_Chao1", "k__Eukaryota_Chao1",
+                                     "k__Archaea_Chao1", "k__Viruses_Chao1",
+                                     "Age", "RECIST", "PFS"),
+                         upper = list(continuous = wrap("cor", size = 5)),
+                         diag = list(discrete="barDiag", continuous = wrap("densityDiag", alpha=0.3)),
+                         lower = list(continuous = wrap("smooth", alpha = 0.3, size = 0.1)),
+                         mapping = aes(color = Response)) +
+  theme_bw() +
+  scale_color_manual(values = c("#C71E1D", "#015069")) +
+  scale_fill_manual(values = c("#C71E1D", "#015069")) + 
+  theme(axis.text.x = element_text(angle = 90))
+
+
+
+reg_pdf2 <- FileCreate(DirPath = paste0(save_path_prefix, "01.AlphaDiversity/Regression"),
+                       Prefix = "Chao1-clinical-response-cross-kingdoms",
+                       Suffix = "pdf")
+
+pdf(file = reg_pdf2, height = 11, width = 11)
+print(num_pair_plot)
+dev.off()
+
+
+# categorical group 
+
+categ_reg_mt <- reg_mt[,c(4, 7, 10, 13, 21, 24, 26, 30, 32, 34, 38)]
+
+
+categ_reg_melt <- melt(categ_reg_mt, na.rm = T, 
+                       variable.name = "subgroup",
+                       id = c("k__Bacteria_Chao1", "k__Eukaryota_Chao1",
+                              "k__Archaea_Chao1", "k__Viruses_Chao1",
+                              "Response"))
+categ_reg_melt <- categ_reg_melt[categ_reg_melt$value != "", ]
+
+for (sg in as.character(unique(categ_reg_melt$subgroup))) {
+  box_pdf <- FileCreate(DirPath =  paste0(save_path_prefix, "01.AlphaDiversity/Categorical"),
+                        Prefix = paste0("Boxplot-Chao1-", sg), Suffix = "pdf")
+  pdf(file = box_pdf, width = length(unique(categ_reg_melt$value[categ_reg_melt$subgroup==sg]))*3, height = 6)
+  for (sub_Chao1 in c("k__Bacteria_Chao1", "k__Eukaryota_Chao1",
+                      "k__Archaea_Chao1", "k__Viruses_Chao1")) {
+    my_box <- ggplot(data = categ_reg_melt %>% 
+                       subset(subgroup == sg),
+                     aes(x = Response, y = .data[[sub_Chao1]], col = Response)) + 
+      facet_wrap(~value, nrow = 1) +
+      stat_boxplot(geom = "errorbar",width=.15) + 
+      geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) + 
+      geom_jitter(alpha = 0.3, width = .3) +
+      scale_color_manual(values = respond_col) +
+      stat_compare_means(comparisons = list(c("NR", "R")), 
+                         size = 7, label = format("p.format" , scientific = T)) +
+      theme_bw() +
+      theme(legend.position = 'none', )+ 
+      labs(title = paste0("Boxplot ", sub_Chao1, " in ", sg, " comparison"))
+    plot(my_box)
+    plot(my_box + theme(text = element_blank()))
+  }
+  dev.off()
+}
+```
+
+#### Cross-kingdoms Shannon-Shannon
+
+```{r chao1-caho1}
+save_or_not <- F
+
+alpha_idx <- "Shannon"
+reg_plot1 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Shannon,
+                            y = k__Eukaryota_Shannon,
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Eukaryota'],
+                            # point.args = list(aes(col = Response)),
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Eukaryota', " in ", alpha_idx)) 
+  # scale_color_manual(values = respond_col)
+
+
+reg_plot2 <- ggscatterstats(data = reg_mt, 
+                            x = k__Bacteria_Shannon,
+                            y = k__Archaea_Shannon,
+                            type = "spearman",
+                            xfill = tax_col['k__Bacteria'],
+                            yfill = tax_col['k__Archaea'],
+                            # point.args = list(aes(col = Response)),
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Bacteria", " & ",
+                                           'Archaea', " in ", alpha_idx)) 
+  # scale_color_manual(values = respond_col)
+
+
+reg_plot3 <- ggscatterstats(data = reg_mt, 
+                               x = k__Bacteria_Shannon,
+                               y = k__Viruses_Shannon,
+                               type = "spearman",
+                               xfill = tax_col['k__Bacteria'],
+                               yfill = tax_col['k__Viruses'],
+                               marginal.type = "histogram",  
+                               title = paste0("Relationship between ", 
+                                              "Bacteria", " & ",
+                                              'Viruses', " in ", alpha_idx))
+
+
+reg_plot4 <- ggscatterstats(data = reg_mt, 
+                            x = k__Eukaryota_Shannon,
+                            y = k__Archaea_Shannon,
+                            type = "spearman",
+                            xfill = tax_col['k__Eukaryota'],
+                            yfill = tax_col['k__Archaea'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Eukaryota", " & ",
+                                           'Archaea', " in ", alpha_idx))
+
+
+reg_plot5 <- ggscatterstats(data = reg_mt, 
+                            x = k__Eukaryota_Shannon,
+                            y = k__Viruses_Shannon,
+                            type = "spearman",
+                            xfill = tax_col['k__Eukaryota'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Eukaryota", " & ",
+                                           'Viruses', " in ", alpha_idx))
+
+
+reg_plot6 <- ggscatterstats(data = reg_mt, 
+                            x = k__Archaea_Shannon,
+                            y = k__Viruses_Shannon,
+                            type = "spearman",
+                            xfill = tax_col['k__Archaea'],
+                            yfill = tax_col['k__Viruses'],
+                            marginal.type = "histogram",  
+                            title = paste0("Relationship between ", 
+                                           "Archaea", " & ",
+                                           'Viruses', " in ", alpha_idx))
+
+if (save_or_not) {
+  reg_pdf1 <- FileCreate(DirPath = paste0(save_path_prefix, "/01.AlphaDiversity/Regression"),
+                         Prefix = "Shannon-Shannon-cross-kingdoms",
+                         Suffix = "pdf")
+  
+  pdf(file = reg_pdf1, height = 7, width = 7)
+  plot(reg_plot1)
+  plot(reg_plot2)
+  plot(reg_plot3)
+  plot(reg_plot4)
+  plot(reg_plot5)
+  plot(reg_plot6)
+  dev.off()
+}
+
+
+```
+
+#### Kingdoms Shannon & clinical index
+
+```{r Shannon clinical index}
+# numerical
+## check which pairs are meaningful
+num_reg_mt <- reg_mt[,c(5, 8, 11, 14, 25, 36, 37)]
+num_reg_mt$RECIST <- as.numeric(num_reg_mt$RECIST)
+# reg_res_rcorr <- rcorr(as.matrix(num_reg_mt[reg_mt$Response == "R", ]), type = 'spearman')
+
+num_pair_plot <- ggpairs(num_reg_mt,
+                         columns = c("k__Bacteria_Chao1", "k__Eukaryota_Chao1",
+                                     "k__Archaea_Chao1", "k__Viruses_Chao1",
+                                     "Age", "RECIST", "PFS"),
+                         upper = list(continuous = wrap("cor", size = 5)),
+                         diag = list(discrete="barDiag", continuous = wrap("densityDiag", alpha=0.3)),
+                         lower = list(continuous = wrap("smooth", alpha = 0.3, size = 0.1)),
+                         mapping = aes(color = Response)) +
+  theme_bw() +
+  scale_color_manual(values = c("#C71E1D", "#015069")) +
+  scale_fill_manual(values = c("#C71E1D", "#015069")) + 
+  theme(axis.text.x = element_text(angle = 90))
+
+
+
+reg_pdf2 <- FileCreate(DirPath = paste0(save_path_prefix, "01.AlphaDiversity/Regression"),
+                       Prefix = "Shannon-clinical-response-cross-kingdoms",
+                       Suffix = "pdf")
+
+pdf(file = reg_pdf2, height = 11, width = 11)
+print(num_pair_plot)
+dev.off()
+
+
+# categorical group 
+
+categ_reg_mt <- reg_mt[,c(5, 8, 11, 14, 21, 24, 26, 30, 32, 34, 38)]
+
+
+categ_reg_melt <- melt(categ_reg_mt, na.rm = T, 
+                       variable.name = "subgroup",
+                       id = c("k__Bacteria_Shannon", "k__Eukaryota_Shannon",
+                              "k__Archaea_Shannon", "k__Viruses_Shannon",
+                              "Response"))
+categ_reg_melt <- categ_reg_melt[categ_reg_melt$value != "", ]
+
+for (sg in as.character(unique(categ_reg_melt$subgroup))) {
+  box_pdf <- FileCreate(DirPath =  paste0(save_path_prefix, "01.AlphaDiversity/Categorical"),
+                        Prefix = paste0("Boxplot-Shannon-", sg), Suffix = "pdf")
+  pdf(file = box_pdf, width = length(unique(categ_reg_melt$value[categ_reg_melt$subgroup==sg]))*3, height = 6)
+  for (sub_Shannon in c("k__Bacteria_Shannon", "k__Eukaryota_Shannon",
+                      "k__Archaea_Shannon", "k__Viruses_Shannon")) {
+    my_box <- ggplot(data = categ_reg_melt %>% 
+                       subset(subgroup == sg),
+                     aes(x = Response, y = .data[[sub_Shannon]], col = Response)) + 
+      facet_wrap(~value, nrow = 1) +
+      stat_boxplot(geom = "errorbar",width=.15) + 
+      geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE) + 
+      geom_jitter(alpha = 0.3, width = .3) +
+      scale_color_manual(values = respond_col) +
+      stat_compare_means(comparisons = list(c("NR", "R")), 
+                         size = 7, label = format("p.format" , scientific = T)) +
+      theme_bw() +
+      theme(legend.position = 'none', )+ 
+      labs(title = paste0("Boxplot ", sub_Shannon, " in ", sg, " comparison"))
+    plot(my_box)
+    plot(my_box + theme(text = element_blank()))
+  }
+  dev.off()
+}
+```
+
+## Beta diversity
+
+### PCoA Plot (Response)
+
+[ref](https://mp.weixin.qq.com/s?__biz=MzIzMTgwMjk1NQ==&mid=2247484625&idx=2&sn=52ca84ab65b0de9446303e2104582467&chksm=e89fd5f5dfe85ce35fabcb358c21bd9c460e09049b8f8f2874051406b46a37667ec271cae029&scene=21#wechat_redirect)
+
+```{r pcoa response}
+cal_or_not <- T
+
+tmp_otu_mt <- as.data.frame(t(bICI_dataset$otu_table))
+tmp_group <- bICI_dataset$sample_table$Response
+tmp_subgroup <- bICI_dataset$sample_table$Disease
+
+if (cal_or_not) {
+  all_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_dataset$otu_table)), 
+                          group = bICI_dataset$sample_table$Response, 
+                          pcoa_col = respond_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/All"), 
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_dataset$sample_table$Disease)
+  
+  bac_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_list$k__Bacteria$otu_table)), 
+                          group = bICI_list$k__Bacteria$sample_table$Response, 
+                          pcoa_col = respond_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/Bacteria"), 
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_list$k__Bacteria$sample_table$Disease)
+  
+  euk_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_list$k__Eukaryota$otu_table)), 
+                          group = bICI_list$k__Eukaryota$sample_table$Response, 
+                          pcoa_col = respond_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/Eukaryota"), 
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_list$k__Eukaryota$sample_table$Disease)
+  
+  vir_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_list$k__Viruses$otu_table)), 
+                          group = bICI_list$k__Viruses$sample_table$Response, 
+                          pcoa_col = respond_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/Virus"), 
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_list$k__Viruses$sample_table$Disease)
+  
+  arc_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_list$k__Archaea$otu_table)),
+                          group = bICI_list$k__Archaea$sample_table$Response,
+                          pcoa_col = respond_col, save_or_not = T,
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/Archaea"),
+                          Prefix = "PCoA_Response",
+                          subgroup = bICI_list$k__Archaea$sample_table$Disease)
+
+}else{
+  all_pcoa_res <- readRDS(paste0(save_path_prefix, "/02.BetaDiversity/All/2022-07-20-PCoA_list-v1.0.rds"))
+  bac_pcoa_res <- readRDS(paste0(save_path_prefix, "/02.BetaDiversity/Bacteria/2022-07-20-PCoA_list-v1.0.rds"))
+  vir_pcoa_res <- readRDS(paste0(save_path_prefix, "/02.BetaDiversity/Eukaryota/2022-07-20-PCoA_list-v1.0.rds"))
+  vir_pcoa_res <- readRDS(paste0(save_path_prefix, "/02.BetaDiversity/Virus/2022-07-20-PCoA_list-v1.0.rds"))
+  arc_pcoa_res <- readRDS(paste0(save_path_prefix, "/02.BetaDiversity/Archaea/2022-07-20-PCoA_list-v1.0.rds"))
+}
+
+```
+
+### PCoA Plot (Cancer type)
+
+```{r pcoa Cancer type}
+cal_or_not <- T
+
+tmp_otu_mt <- as.data.frame(t(bICI_dataset$otu_table))
+tmp_group <- bICI_dataset$sample_table$Response
+tmp_subgroup <- bICI_dataset$sample_table$Disease
+
+if (cal_or_not) {
+  all_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_dataset$otu_table)), 
+                          group = bICI_dataset$sample_table$Disease, 
+                          pcoa_col = cancer_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/All"), 
+                          Prefix = "PCoA_CancerType",
+                          subgroup = bICI_dataset$sample_table$Response)
+  
+  bac_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_list$k__Bacteria$otu_table)), 
+                          group = bICI_list$k__Bacteria$sample_table$Disease, 
+                          pcoa_col = cancer_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/Bacteria"), 
+                          Prefix = "PCoA_CancerType",
+                          subgroup = bICI_list$k__Bacteria$sample_table$Response)
+  
+  euk_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_list$k__Eukaryota$otu_table)), 
+                          group = bICI_list$k__Eukaryota$sample_table$Disease, 
+                          pcoa_col = cancer_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/Eukaryota"), 
+                          Prefix = "PCoA_CancerType",
+                          subgroup = bICI_list$k__Eukaryota$sample_table$Response)
+  
+  vir_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_list$k__Viruses$otu_table)), 
+                          group = bICI_list$k__Viruses$sample_table$Disease, 
+                          pcoa_col = cancer_col, save_or_not = T, 
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/Virus"), 
+                          Prefix = "PCoA_CancerType",
+                          subgroup = bICI_list$k__Viruses$sample_table$Response)
+  
+  arc_pcoa_res <- My_PCoA(otu_table = as.data.frame(t(bICI_list$k__Archaea$otu_table)),
+                          group = bICI_list$k__Archaea$sample_table$Disease,
+                          pcoa_col = cancer_col, save_or_not = T,
+                          save_path = paste0(save_path_prefix, "/02.BetaDiversity/Archaea"),
+                          Prefix = "PCoA_CancerType",
+                          subgroup = bICI_list$k__Archaea$sample_table$Response)
+
+}else{
+  all_pcoa_res <- readRDS(paste0(save_path_prefix, 
+                                 "/02.BetaDiversity/All/2022-07-29-PCoA_CancerType_list-v1.0.rds"))
+  bac_pcoa_res <- readRDS(paste0(save_path_prefix,
+                                 "/02.BetaDiversity/Bacteria/2022-07-29-PCoA_CancerType_list-v1.0.rds"))
+  vir_pcoa_res <- readRDS(paste0(save_path_prefix,
+                                 "/02.BetaDiversity/Eukaryota/2022-07-29-PCoA_CancerType_list-v1.0.rds"))
+  vir_pcoa_res <- readRDS(paste0(save_path_prefix, 
+                                 "/02.BetaDiversity/Virus/2022-07-29-PCoA_CancerType_list-v1.0.rds"))
+  arc_pcoa_res <- readRDS(paste0(save_path_prefix, 
+                                 "/02.BetaDiversity/Archaea/2022-07-29-PCoA_CancerType_list-v1.0.rds"))
+}
+
+
+
+```
+### PCoA percent of variation explained
+
+
+```{r PCoA percent of variation explained}
+
+otu_table = as.data.frame(t(bICI_dataset$otu_table))
+
+dist_res <- vegdist(otu_table,method = "bray")
+
+pcoa_res = cmdscale(dist_res, k=30, eig=TRUE) 
+
+# points_res <- as.data.frame(pcoa_res$points) 
+
+# was_res <- wascores(pcoa_res$points, otu_table)
+
+eig_res = pcoa_res$eig
+
+pcoa_contribution <- NULL
+
+for (i in 1:30) {
+  pcoa_contribution[i] <- 100 * eig_res[i]/sum(eig_res)
+}
+
+
+pcoa_contr_mt <- data.frame(contribution = pcoa_contribution,
+                            item = paste0("PCoA ", 1:30 ))
+pcoa_contr_mt$item <- factor(x = pcoa_contr_mt$item, 
+                             levels = pcoa_contr_mt$item)
+
+pcoa_exp_plot <- ggplot(data = pcoa_contr_mt, 
+                        aes(x = item, y = contribution)) + 
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5),
+        axis.title = element_blank())
+pcoa_exp_plot
+
+pcoa_exp_pdf <- FileCreate(DirPath = paste0(save_path_prefix, '02.BetaDiversity/All'),
+                           Prefix = "PCoA-percent-of-variation-explained",
+                           Suffix = "pdf")
+
+pdf(file = pcoa_exp_pdf, width = 5, height = 5)
+plot(pcoa_exp_plot)
+dev.off()
+
+```
+
+## Phylum Composition
+
+### data preparing
+
+```{r phylum composition data preparing}
+group_mt <- bICI_dataset$sample_table[, c("Response", "Disease")]
+
+
+bac_summary <- Phylum_summary(otu = bICI_list$k__Bacteria$taxa_abund$Phylum, 
+                              group = group_mt$Response, 
+                              subgroup = group_mt$Disease,
+                              other = "k__Bacteria|p__Other",
+                              cutoff = 0.05)
+euk_summary <- Phylum_summary(otu = bICI_list$k__Eukaryota$taxa_abund$Phylum, 
+                              group = group_mt$Response, 
+                              subgroup = group_mt$Disease,
+                              other = "k__Eukaryota|p__Other",
+                              cutoff = 0.05)
+arc_summary <- Phylum_summary(otu = bICI_list$k__Archaea$taxa_abund$Phylum, 
+                              group = group_mt$Response, 
+                              subgroup = group_mt$Disease,
+                              other = "k__Archaea|p__Other",
+                              cutoff = 0.05)
+vir_summary <- Phylum_summary(otu = bICI_list$k__Viruses$taxa_abund$Phylum, 
+                              group = group_mt$Response, 
+                              subgroup = group_mt$Disease,
+                              other = "k__Viruses|p__Other",
+                              cutoff = 0.05)
+
+
+```
+
+### Pie plot 
+```{R}
+# combine the data
+comb_summary <- rbind(cbind(Phylum = rep("k__Bacteria", nrow(bac_summary$summary_melt)),
+                            bac_summary$summary_melt),
+                      cbind(Phylum = rep("k__Eukaryota", nrow(euk_summary$summary_melt)),
+                            euk_summary$summary_melt),
+                      cbind(Phylum = rep("k__Archaea", nrow(arc_summary$summary_melt)),
+                            arc_summary$summary_melt),
+                      cbind(Phylum = rep("k__Viruses", nrow(vir_summary$summary_melt)),
+                            vir_summary$summary_melt))
+
+comb_summ_csv <- FileCreate(DirPath = paste0(save_path_prefix, '03.PhylumComposition/'),
+                            Prefix = "Phylym-Composition-Summary",
+                            Suffix = "csv")
+write.csv(x = comb_summary, file = comb_summ_csv)
+
+# set the ranking
+comb_summary$Phylum <- factor(x = comb_summary$Phylum, 
+                              levels = c("k__Bacteria", "k__Eukaryota", 
+                                         "k__Archaea", "k__Viruses"))
+comb_summary$subgroup <- factor(x = comb_summary$subgroup,
+                                levels = c("All", "MM", "NSCLC", "RCC", "HCC"))
+comb_summary$group <- factor(x = comb_summary$group,
+                             levels = c("NR", "All", "R"))
+
+phyl_col <- cbind(`k__Bacteria|p__Bacteroidetes` = "#c30010",
+                  `k__Bacteria|p__Firmicutes` = "#ff2c2c",
+                  `k__Bacteria|p__Proteobacteria` = "#ffcbd1",
+                  `k__Bacteria|p__Other` = "#828385",
+                  `k__Eukaryota|p__Apicomplexa` = "#FFA301",
+                  `k__Eukaryota|p__Ascomycota` = "#FFFD01",
+                  `k__Eukaryota|p__Basidiomycota` = "#FFFF8F",
+                  `k__Eukaryota|p__Other` = "#828385",
+                  `k__Archaea|p__Euryarchaeota` = "#0077b6",
+                  `k__Archaea|p__Candidatus_Thermoplasmatota` = "#00b4d8",
+                  `k__Archaea|p__Other` = "#828385",
+                  `k__Viruses|p__Uroviricota` = "#72cc50",
+                  `k__Viruses|p__Other` = "#828385")
+
+phyl_comp_plot <- ggplot(comb_summary, aes(x = group, y = prop, col = group,
+                                           fill = feature, alpha = group)) +
+  geom_bar(stat = "identity", position="fill", width = 0.9) +
+  coord_polar(theta = "y")+
+  theme_void() +
+  facet_grid(vars(Phylum), vars(subgroup))+ 
+  scale_alpha_manual(values = c(NR = .5, All = 1, R = .5))+
+  xlim(c("", " ", "   ","NR", "All", "R")) + 
+  scale_fill_manual(values = phyl_col) +
+  scale_color_manual(values = c(NR = 'white', All = "black", R = 'white'))
+
+
+phyl_comp_pdf <- FileCreate(DirPath = paste0(save_path_prefix, '03.PhylumComposition/'),
+                            Prefix = "Phylym-Composition",
+                            Suffix = "pdf")
+
+pdf(file = phyl_comp_pdf, width = 10, height = 10)
+plot(phyl_comp_plot + theme(legend.position = "none", strip.text = element_blank()))
+plot(phyl_comp_plot + theme(legend.position = "none"))
+plot(as_ggplot(get_legend(phyl_comp_plot)))
+dev.off()
+
+kingdom_prop <- cbind(t(bICI_dataset$taxa_abund$Kingdom), 
+                      Disease = bICI_dataset$sample_table$Disease) %>%
+  as.data.frame() %>%
+  group_by(Disease) %>%
+  summarise_at(vars(colnames(t(bICI_dataset$taxa_abund$Kingdom))), 
+               function(x) sprintf("%0.2f", mean(as.numeric(x))*100))
+
+kingdom_prop2 <- t(bICI_dataset$taxa_abund$Kingdom) %>%
+  as.data.frame() %>%
+  summarise_at(vars(colnames(t(bICI_dataset$taxa_abund$Kingdom))), 
+               function(x) sprintf("%0.2f", mean(as.numeric(x))*100))
+kingdom_prop2 <- cbind(Disease = "All", kingdom_prop2)
+
+kingdom_prop_c <- rbind(kingdom_prop, kingdom_prop2) %>%
+  as.data.frame()
+
+comb_prop_csv <- FileCreate(DirPath = paste0(save_path_prefix, '03.PhylumComposition/'),
+                            Prefix = "Phylym-Composition-Proportion",
+                            Suffix = "csv")
+write.csv(x = kingdom_prop_c, file = comb_prop_csv)
+
+
+```
+
+
+
+## Discard
+<!---
+
+
+#### Wilcox_mt
+
+```{r wilcox_mt}
+Wilcox_mt <- function(data, group){
+  `%ni%`<-Negate(`%in%`)
+  comparison_df <- as.data.frame(t(combn(as.character(sort(unique(data[[group]]))), 2)))
+  tmp_df <- matrix(NA, nrow = nrow(comparison_df), ncol = ncol(data)-1)
+  for (n in 1:nrow(comparison_df)) {
+    comparison_list <- unlist(comparison_df[n, ]) 
+    tmp_p <- NULL
+    for (candidate in colnames(data)[colnames(data) %ni% group]) {
+      tmp_cand_df <- data[,c(candidate, group)]
+      colnames(tmp_cand_df) <- c('feature', 'group')
+      if(nrow(comparison_df) != 1){
+        wil_res <- wilcox.test(feature ~ group,
+                               data = tmp_cand_df[tmp_cand_df$group %in% comparison_list,])
+      }else{
+        wil_res <- wilcox.test(feature ~ group,
+                               data = tmp_cand_df)
+      }
+      tmp_p <- c(tmp_p, wil_res$p.value)
+    }
+    tmp_df[n,] <- tmp_p
+  }
+  comparison_df <- as.data.frame(cbind(comparison_df, tmp_df))
+  colnames(comparison_df) <- c("G1", "G2", colnames(data)[colnames(data) %ni% group])
+  return(comparison_df)
+}
+
+```
+
+```{r}
+
+bICI_bac <- bICI_dataset$clone()
+bICI_bac$tax_table %<>% subset(Kingdom == "k__Bacteria")
+bICI_bac$cal_abund()
+bICI_bac$tidy_dataset()
+bICI_bac$cal_alphadiv(PD = FALSE)
+
+bICI_euk <- bICI_dataset$clone()
+bICI_euk$tax_table %<>% subset(Kingdom == "k__Eukaryota")
+bICI_euk$cal_abund()
+bICI_euk$tidy_dataset()
+bICI_euk$cal_alphadiv(PD = FALSE)
+
+bICI_vir <- bICI_dataset$clone()
+bICI_vir$tax_table %<>% subset(Kingdom == "k__Viruses")
+bICI_vir$cal_abund()
+bICI_vir$tidy_dataset()
+bICI_vir$cal_alphadiv(PD = FALSE)
+
+bICI_arc <- bICI_dataset$clone()
+bICI_arc$tax_table %<>% subset(Kingdom == "k__Archaea")
+bICI_arc$cal_abund()
+bICI_arc$tidy_dataset()
+bICI_arc$cal_alphadiv(PD = FALSE)
+
+```
+
+
+```{r alpha}
+
+all_chao1_plot <- ggplot(data = all_alpha , aes(x = Response, y = Chao1)) + 
+  stat_boxplot(geom = "errorbar",width=0.15, aes(color = Response)) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE, aes(color = Response)) + 
+  geom_jitter(aes(col = Disease), alpha = 0.3) +
+  scale_color_manual(values = c(respond_col, cancer_col)) +
+  stat_compare_means(comparisons = list(c("R", "NR"))) + 
+  theme_bw()
+
+all_shannon_plot <- ggplot(data = all_alpha , aes(x = Response, y = Shannon)) + 
+  stat_boxplot(geom = "errorbar",width=0.15, aes(color = Response)) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE, aes(color = Response)) + 
+  geom_jitter(aes(col = Disease), alpha = 0.3) +
+  scale_color_manual(values = c(respond_col, cancer_col)) +
+  stat_compare_means(comparisons = list(c("R", "NR"))) + 
+  theme_bw() 
+
+all_simpson_plot <- ggplot(data = all_alpha , aes(x = Response, y = Simpson)) + 
+  stat_boxplot(geom = "errorbar",width=0.15, aes(color = Response)) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE, aes(color = Response)) + 
+  geom_jitter(aes(col = Disease), alpha = 0.3) +
+  scale_color_manual(values = c(respond_col, cancer_col)) +
+  stat_compare_means(comparisons = list(c("R", "NR"))) + 
+  theme_bw()
+
+all_invSimpson_plot <- ggplot(data = all_alpha , aes(x = Response, y = InvSimpson)) + 
+  stat_boxplot(geom = "errorbar",width=0.15, aes(color = Response)) + 
+  geom_boxplot(outlier.shape = NA, varwidth = F, notch = TRUE, aes(color = Response)) + 
+  geom_jitter(aes(col = Disease), alpha = 0.3) +
+  scale_color_manual(values = c(respond_col, cancer_col)) +
+  stat_compare_means(comparisons = list(c("R", "NR"))) + 
+  theme_bw()
+
+all_invSimpson_plot + facet_wrap(. ~ Disease, scales = "free_y", nrow = 1)
+all_simpson_plot + facet_wrap(. ~ Disease, scales = "free_y", nrow = 1)
+all_shannon_plot + facet_wrap(. ~ Disease, scales = "free_y", nrow = 1)
+all_chao1_plot + facet_wrap(. ~ Disease, scales = "free_y", nrow = 1)
+
+```
+
+### NMDS
+
+```{r NMDS}
+tmp_otu_mt <- as.data.frame(t(bICI_dataset$otu_table))
+tmp_group <- bICI_dataset$sample_table$Response
+tmp_subgroup <- bICI_dataset$sample_table$Disease
+
+My_NMDS <- function(otu_table, group, 
+                    sample_as_row = T,
+                    distance = "bray",
+                    subgroup = NULL){
+  if (!sample_as_row) {
+    otu_table <- as.data.frame(t(otu_table))
+  }
+  if (nrow(otu_table) != length(group)) {
+    return(message("please confirmed otu sample size is equal to group's length!"))
+  }
+  mds_res <- metaMDS(comm = otu_table, distance = distance)
+  mds_score <- as.data.frame(scores(mds_res, "sites"))
+  mds_score$SampleID <- rownames(otu_table)
+  mds_score$group <- group
+  mds_score$subgroup <- subgroup
+  
+  mds_score2 <- subset(mds_score,
+                       (NMDS1 >= quantile(mds_score$NMDS1, .02)) &
+                         (NMDS1 <= quantile(mds_score$NMDS1, .98)) &
+                         (NMDS2 >= quantile(mds_score$NMDS2, .02)) &
+                         (NMDS2 <= quantile(mds_score$NMDS2, .98)))
+  
+  nmds_plot <- ggplot(mds_score2, aes(x = NMDS1, y = NMDS2, col = group)) +
+    geom_point(aes(shape = subgroup)) +
+    theme_bw() + 
+    stat_ellipse()
+  
+  
+}
+
+
+```
+
+
+
+
+## Feature selection
+
+### lefse
+
+LEfSe method based on Segata et al. (2011) <doi:10.1186/gb-2011-12-6-r60>
+
+```{r feature selection}
+
+bICI_lefse <- trans_diff$new(dataset = bICI_euk, 
+                             method = 'lefse', 
+                             group = "Response", 
+                             alpha = .05)
+
+bICI_lefse$plot_diff_bar(threshold = 4)
+
+```
+
+### random forest
+
+random forest and non-parametric test method based on An et al. (2019) <doi:10.1016/j.geoderma.2018.09.035>
+
+```{r rf}
+bICI_rf <- trans_diff$new(dataset = bICI_dataset, 
+                          method = 'rf', 
+                          group = "Response", 
+                          rf_ntree = 1000,
+                          alpha = .05)
+
+
+```
+
+### metastat
+
+Metastat method for all paired groups based on White et al. (2009) <doi:10.1371/journal.pcbi.1000352>
+
+```{r metastat}
+bICI_metastat <- trans_diff$new(dataset = bICI_dataset,
+                                method = 'metastat', 
+                                group = "Response")
+
+```
+
+### mseq
+
+zero-inflated log-normal model-based differential test method from metagenomeSeq package
+
+```{r mseq}
+bICI_mseq <- trans_diff$new(dataset = bICI_dataset,
+                            method = 'mseq', 
+                            group = "Response",
+                            mseq_count = 1)
+
+
+```
+
+### Wilcoxon
+
+Wilcoxon Rank Sum and Signed Rank Tests for all paired groups
+
+```{r wilcoxon}
+bICI_wilcox <- trans_diff$new(dataset = bICI_dataset,
+                              method = 'wilcox', 
+                              group = "Response")
+```
+
+
+
+
+-->
+
+
+

@@ -1,0 +1,3066 @@
+---
+title: "Classifier"
+author: "IvanLIN"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages and functions
+
+### Packages
+
+```{r packages}
+if (!require(randomForest)) install.packages("randomForest"); require(randomForest) # randomForest
+if (!require(parallel)) install.packages("parallel"); require(parallel) # detectCores
+if (!require(mlbench)) install.packages("mlbench"); require(mlbench)
+if (!require(foreach)) install.packages("foreach"); require(foreach)
+if (!require(doParallel)) install.packages("doParallel"); require(doParallel) # registerDoParallel
+if (!require(magrittr)) install.packages("magrittr"); require(magrittr) # %>%
+if (!require(dplyr)) install.packages("dplyr"); require(dplyr) # select
+if (!require(tidyverse)) install.packages("tidyverse"); require(tidyverse) # select
+if (!require(caret)) install.packages("caret"); require(caret) # rfe
+if (!require(ggpubr)) devtools::install_github("kassambara/ggpubr"); require(ggpubr) # compare_means
+if (!require(pROC)) install.packages("pROC"); require(pROC) # roc
+if (!require(MLeval)) install.packages("MLeval"); require(MLeval) # evalm
+if (!require(ROCR)) install.packages("ROCR"); require(ROCR) # roc.test
+if (!require(ggtern)) install.packages("ggtern"); require(ggtern) # ggtern 三元图
+
+```
+
+
+### FileCreate
+
+```{r}
+FileCreate <- function(DirPath = "./",Prefix = "ExampleTest", Suffix = "pdf", version = "0.0"){
+  date=as.character(Sys.Date())
+  DirPath = gsub("/$","",DirPath)
+  Suffix = gsub('^[.]',"",Suffix)
+  if(! dir.exists(DirPath)){
+    dir.create(DirPath,recursive =TRUE)
+  }
+  if (version == "0.0") {
+    version=10
+    while(TRUE){
+      version_=paste(unlist(strsplit(as.character(version),"")),collapse=".")
+      DirPathName = paste0(DirPath,"/",date,'-',Prefix,'-v',version_,".",Suffix)
+      if(! file.exists(DirPathName)){
+        return(DirPathName)
+        break
+      }
+      version = version + 1
+    }
+  }else{
+    DirPathName = paste0(DirPath,"/",date,'-',Prefix,'-v',version,".",Suffix)
+    if(! dir.exists(DirPathName)){
+      return(DirPathName)
+    }
+    return(DirPathName)
+  }
+}
+  
+```
+
+
+### MedianNormal
+
+```{r MedianNormal}
+MedianNormal <- function(raw_df, meta_df, rarefy_cutoff = 0.01, min_add = 0.0001){
+  hRaw_df <- (raw_df[rowMeans(raw_df) >rarefy_cutoff/100, ] + min_add/100) %>% 
+    t() %>% as.data.frame()
+  merge_df <- merge(hRaw_df, by = "row.names",
+                    meta_df[, c("Cohort_name", "Disease", "Response")]) %>%
+    column_to_rownames("Row.names")
+  
+  mn_index_df <- merge_df %>% 
+    group_by(Cohort_name, Disease, Response) %>%
+    summarise_all('median') %>%
+    subset(select = -c(Response)) %>%
+    group_by(Cohort_name, Disease) %>%
+    summarise_all(function(x) sum(1/x)/2)
+   
+  nm_df <- hRaw_df
+  for (subsample in rownames(nm_df)) {
+    catology <- meta_df[subsample, c("Cohort_name", "Disease")] %>% as.character()
+    nm_df[subsample, ] <- nm_df[subsample, ] * 
+      mn_index_df[mn_index_df$Cohort_name == catology[1] & 
+                    mn_index_df$Disease == catology[2], c(-1, -2)]
+  }
+  return(list(nm_df = nm_df, mn_index_df = mn_index_df))
+}
+
+```
+
+### ShortName
+
+```{r shortname}
+ShortName <- function(x){
+  lapply(x, function(x) {
+                   k <- strsplit( x = x, split = "\\|") %>%
+                     unlist(); 
+                   return(k[length(k)])
+                   }) %>% 
+                 unlist()
+}
+```
+### ShortKingdom
+
+```{r ShortKingdom}
+ShortKingdom <- function(x){
+  lapply(x, function(x) {
+                   k <- strsplit( x = x, split = "\\|") %>%
+                     unlist(); 
+                   return(k[1])
+                   }) %>% 
+                 unlist()
+}
+```
+
+### MyFreq
+
+```{r MyFreq}
+MyFreq <- function(x){
+  table(x) %>% 
+    as.data.frame() %>% 
+    arrange(desc(Freq)) 
+}
+```
+
+### t.test2
+
+```{r t test2}
+t.test2 <- function(m1,m2,s1,s2,n1,n2,m0=0,equal.variance=FALSE)
+{
+    if( equal.variance==FALSE ) 
+    {
+        se <- sqrt( (s1^2/n1) + (s2^2/n2) )
+        # welch-satterthwaite df
+        df <- ( (s1^2/n1 + s2^2/n2)^2 )/( (s1^2/n1)^2/(n1-1) + (s2^2/n2)^2/(n2-1) )
+    } else
+    {
+        # pooled standard deviation, scaled by the sample sizes
+        se <- sqrt( (1/n1 + 1/n2) * ((n1-1)*s1^2 + (n2-1)*s2^2)/(n1+n2-2) ) 
+        df <- n1+n2-2
+    }      
+    t <- (m1-m2-m0)/se 
+    dat <- c(m1-m2, se, t, 2*pt(-abs(t),df))    
+    names(dat) <- c("Difference of means", "Std Error", "t", "p-value")
+    return(dat) 
+}
+```
+
+### Compared_50AUC
+
+```{r Compared_50AUC}
+Compared_50AUC <- function(auc1, auc2 = "default", method = "delong"){
+  if (is.character(auc2)) {
+    auc2 <- roc(rep(c("yes", "no"), each = 50),
+                rep(0.5, 100), quiet = T,  percent = T)
+    delong_res <- roc.test(auc1, auc2, method = method)
+  }else if(class(auc2) == "roc"){
+    delong_res <- roc.test(auc1, auc2, method = method)
+  }else{
+    message("auc format is wrong, plz import roc or default.")
+    return()
+  }
+}
+
+```
+
+### FoldChange
+
+```{r foldchange}
+
+FoldChange <- function(sub_otu, sub_meta, sub_catolog, sub_comparison, comp_rank){
+  merge_df <- merge(t(sub_otu),
+                    sub_meta[, c(sub_catolog, sub_comparison)],
+                    by = "row.names") %>% column_to_rownames("Row.names")
+  merge_df_colname <- colnames(merge_df) 
+  names(merge_df_colname) <- paste0("F", c(1:ncol(merge_df)))
+  colnames(merge_df) <- paste0("F", c(1:ncol(merge_df)))
+  colnames(merge_df)[c(ncol(merge_df)-c(1,0))] <- c(sub_catolog, sub_comparison)
+  
+  FC_df <- matrix(NA, nrow = ncol(merge_df)-2,
+                   ncol = length(unique(merge_df[[sub_catolog]]))+1,
+                   dimnames = list(colnames(merge_df)[-ncol(merge_df)+c(0,1)], 
+                                   c(unique(merge_df[[sub_catolog]]), "All"))) %>%
+    as.data.frame()
+  
+  for (sub_feature in colnames(merge_df)[-c(ncol(merge_df), ncol(merge_df)-1)]) {
+    for (sub_subgroup in unique(merge_df[[sub_catolog]])) {
+      FC_value <- (mean(merge_df[merge_df[[sub_catolog]] == sub_subgroup & 
+                                  merge_df[[sub_comparison]] == comp_rank[1], sub_feature])/ 
+        mean(merge_df[merge_df[[sub_catolog]] == sub_subgroup & 
+                        merge_df[[sub_comparison]] == comp_rank[2], sub_feature])) %>% log2()
+      FC_df[sub_feature, sub_subgroup] <- FC_value
+    }
+    FC_value <- (mean(merge_df[merge_df[[sub_comparison]] == comp_rank[1], sub_feature])/ 
+        mean(merge_df[merge_df[[sub_comparison]] == comp_rank[2], sub_feature])) %>% log2()
+    FC_df[sub_feature, "All"] <- FC_value
+  }
+  # FC_df[is.na(FC_df)] <- 1
+  rownames(FC_df) <- merge_df_colname[rownames(FC_df)]
+  return(FC_df)
+}
+```
+## Parameters
+
+```{r parameters}
+respond_col <- c(NR = '#C71E1D', R = '#015069')
+
+tax_col <- c(k__Bacteria = "#f9b4ab", k__Eukaryota = "#FDEBD3",
+             k__Archaea = "#7aa9d1", k__Viruses = "#96b6ad")
+
+cohort_col <- c(`2017_Frankel` = "#EE6B3B", `2018_Gopalakrishnan` = "#A02C5D",
+                `2018_Maston` = "#EC0F47", `2018_Routy` = "#700460",
+                `2019_Peters` = "#022C7A", `2019_Zheng` = "#1A1333",
+                `2021_Baruch` = "#FBBF54", `2021_Spencer` = "#045459",
+                `2021_Davar` = "#ABD96D", `2022_McCulloch` = "#15C286",
+                `2022_Lee` = "#262949", `2022_Derosa` = "#087353")
+
+cancer_col <- c(MM = "#7f58af", HCC = '#64C5EB', 
+                NSCLC = '#E84D8A', RCC = '#FEB326')
+save_path_prefix <- "../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/"
+
+# min_add = 0.0001
+
+```
+
+## Import data
+
+```{r import data}
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "01.PreProcessing/MN_Idx/"))
+med_nor_list <- list()
+med_nor_list[["k__Bacteria"]] <- readRDS(file = "MN_res-Bacteria-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Bacteria_mn_res-v1.0.rds")
+med_nor_list[["k__Eukaryota"]] <- readRDS(file = "MN_res-Eukaryota-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Eukaryota_mn_res-v1.0.rds")
+med_nor_list[["k__Archaea"]] <- readRDS(file = "MN_res-Archaea-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Archaea_mn_res-v1.0.rds")
+med_nor_list[["k__Viruses"]] <- readRDS(file = "MN_res-Viruses-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Viruses_mn_res-v1.0.rds")
+setwd(tmp_path)
+
+## filter the selected features, establish a new NormMed matrix
+for (sel_kd in names(med_nor_list)) {
+  med_nor_list[[sel_kd]][["sel_mn_df"]] <- med_nor_list[[sel_kd]][["nm_df"]] %>% 
+    select(med_nor_list[[sel_kd]][["sel_otu"]] %>%
+             rownames())%>% 
+    t() %>% as.data.frame()
+}
+
+
+# Wilcox results 
+wil_res <- list()
+
+## cancer type
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN/rds"))
+wil_res[["CancerType"]]$k__Bacteria <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Bacteria-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Eukaryota <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Eukaryota-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Archaea <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Archaea-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Viruses <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Viruses-bICI-v1.0.rds"))
+setwd(tmp_path)
+
+
+## Cohort disease
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds"))
+
+wil_res[["CohDis"]]$k__Bacteria <- readRDS("2023-03-15-Wilcox-MN_Idx-Bacteria-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Eukaryota <- readRDS("2023-03-15-Wilcox-MN_Idx-Eukaryota-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Archaea <- readRDS("2023-03-15-Wilcox-MN_Idx-Archaea-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Viruses <- readRDS("2023-03-15-Wilcox-MN_Idx-Viruses-CohDis-v1.0.rds")
+setwd(tmp_path)
+
+## rds
+
+pICI_ds <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-pICI_rare_ds_list_subKingdom-v1.0.rds"))
+iICI_ds <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-iICI_rare_ds_list_subKingdom-v1.0.rds"))
+
+## median normalization
+bICI_ds_list <- readRDS(paste0(save_path_prefix, "01.PreProcessing/RDS/2022-10-19-bICI_rare_ds_list_subKingdom-v1.0.rds"))
+# NormMed result for paired samples (validation cohort 1)
+bICI_mn_list <- list(
+  k__Bacteria = med_nor_list$k__Bacteria$sel_mn_df[, rownames(bICI_ds_list$k__Bacteria$sample_table)],
+  k__Eukaryota = med_nor_list$k__Eukaryota$sel_mn_df[, rownames(bICI_ds_list$k__Eukaryota$sample_table)],
+  k__Archaea = med_nor_list$k__Archaea$sel_mn_df[, rownames(bICI_ds_list$k__Archaea$sample_table)],
+  k__Viruses = med_nor_list$k__Viruses$sel_mn_df[, rownames(bICI_ds_list$k__Viruses$sample_table)]
+)
+# NormMed result for paired samples (validation cohort 1)
+pICI_mn_list <- list(
+  k__Bacteria = med_nor_list$k__Bacteria$sel_mn_df[, rownames(pICI_ds$k__Bacteria$sample_table)],
+  k__Eukaryota = med_nor_list$k__Eukaryota$sel_mn_df[, rownames(pICI_ds$k__Eukaryota$sample_table)],
+  k__Archaea = med_nor_list$k__Archaea$sel_mn_df[, rownames(pICI_ds$k__Archaea$sample_table)],
+  k__Viruses = med_nor_list$k__Viruses$sel_mn_df[, rownames(pICI_ds$k__Viruses$sample_table)]
+)
+# NormMed result for independence samples (validation cohort 2)
+iICI_mn_list <- list(
+  k__Bacteria = med_nor_list$k__Bacteria$sel_mn_df[, rownames(iICI_ds$k__Bacteria$sample_table)],
+  k__Eukaryota = med_nor_list$k__Eukaryota$sel_mn_df[, rownames(iICI_ds$k__Eukaryota$sample_table)],
+  k__Archaea = med_nor_list$k__Archaea$sel_mn_df[, rownames(iICI_ds$k__Archaea$sample_table)],
+  k__Viruses = med_nor_list$k__Viruses$sel_mn_df[, rownames(iICI_ds$k__Viruses$sample_table)]
+)
+
+
+
+
+
+```
+
+
+## Feature Selection
+
+[link](https://stats.stackexchange.com/questions/443234/random-forest-in-r-how-to-perform-feature-extraction-and-reach-the-best-accura)
+
+### feature selection calculate
+
+```{r feature selection}
+cal_or_not <- F
+
+Wilcox_sel_function <- function(df, pvalue = 0.1, num = 2){
+  df1 <- df[rowSums(df < pvalue) >= num, ]
+  return(df1)
+}
+
+my_cand <- list()
+
+
+## cancer type for Eukaryota (p = 0.05; n = 2)
+my_cand$CancerType$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(my_cand$CancerType$k__Eukaryota %>% rownames())
+nrow(my_cand$CancerType$k__Eukaryota) # 39
+
+## cancer type for Bacteria (p = 0.05; n = 2)
+my_cand$CancerType$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(my_cand$CancerType$k__Bacteria %>% rownames())
+nrow(my_cand$CancerType$k__Bacteria) # 8
+
+
+## CohDis for Eukaryota (p = 0.1; n = 4)
+my_cand$CohDis$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 4)
+ShortName(my_cand$CohDis$k__Eukaryota %>% rownames())
+nrow(my_cand$CohDis$k__Eukaryota) # 28
+
+## CohDis for Bacteria (p = 0.1; n = 4)
+my_cand$CohDis$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 4)
+ShortName(my_cand$CohDis$k__Bacteria %>% rownames())
+nrow(my_cand$CohDis$k__Bacteria) # 14
+
+
+sel_cand_list <- list(
+  k__Bacteria = unique(c(my_cand$CancerType$k__Bacteria %>% 
+                           rownames(), 
+                         my_cand$CohDis$k__Bacteria %>% 
+                           rownames())),
+  k__Eukaryota = unique(c(my_cand$CancerType$k__Eukaryota %>% 
+                            rownames(), 
+                          my_cand$CohDis$k__Eukaryota %>% 
+                            rownames()))
+)
+
+lapply(sel_cand_list, length)
+# $k__Bacteria
+# [1] 20
+# 
+# $k__Eukaryota
+# [1] 57
+
+if(cal_or_not){
+  seed_feature_train_list <- list()
+  train_rf_seed <- function(myseed){
+    require(randomForest)
+    require(mlbench)
+    require(magrittr)
+    require(dplyr)
+    require(tidyverse)
+    require(caret)
+    comp_group <- "Response"
+    sub_group <- "Disease"
+  
+    feature_train_list <- list()
+    for (kd in c("k__Bacteria", "k__Eukaryota")) {
+      sub_meta <- bICI_ds_list[[kd]]$sample_table # get the sub kingdom meta information
+      sub_mn_mt <- med_nor_list[[kd]]$sel_mn_df[sel_cand_list[[kd]], rownames(sub_meta)] # get the median normalization matrix
+      myData <- cbind.data.frame(group = sub_meta[[comp_group]], # combine the group information
+                                 sub_group = sub_meta[[sub_group]]) %>%
+        cbind.data.frame(., sub_mn_mt%>% t())
+      
+      cancer_list <- unique(sub_meta[[sub_group]])
+      for (sub_can in cancer_list) {
+        sel_sub_mn_mt <- myData %>%
+          filter(sub_group == sub_can)  # select the cancer type (one of MM, NSCLC, RCC)
+        
+        if (nrow(sel_sub_mn_mt) <= 20){ # HCC only have 7 samples
+          message(kd, " in ", sub_can, " (", nrow(sel_sub_mn_mt), ") is less than 20, and filter it.")
+          next
+        }else{
+          message(kd, " in ", sub_can, " start at ", date())
+        }
+        
+        
+        sel_sub_mn_mt2 <- subset(sel_sub_mn_mt, # only select the otu features
+                                 select = -c(group, sub_group)) %>%
+          as.matrix() 
+          
+        sel_sub_mn_mt2 %<>% .[, -which.min(apply(.,2,sd))] 
+          
+        sel_sub_mn_mt2 %<>% .[, apply(sel_sub_mn_mt2, 2, function(x) MyFreq(x)[1,2]) < nrow(sel_sub_mn_mt2)/2]
+        if (findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8) %>% length() == 0) {
+          ncl_df <- sel_sub_mn_mt2
+        }else{
+          ncl_df <- sel_sub_mn_mt2[, -findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8)] # remove the correlation factors
+        }
+        
+        if(ncol(ncl_df) == 0) next
+        # ncl_df2 <- cbind.data.frame(group = as.factor(sel_sub_mn_mt$group), ncl_df)
+        set.seed(myseed)
+        
+        # colnames(ncl_df2) %<>% gsub("^k__.+\\|", "", .) %>% gsub("\\.|\\[|\\]|\\-|\\:|\\/|\\(|\\)", "_", .)
+        
+        # rf <-randomForest(group~.,data=ncl_df2, importance=TRUE,ntree=500)
+        
+        # varImpPlot(rf, n.var = 20)
+        
+        my_size <- c(1:ncol(ncl_df))
+        # my_size <- c(1, seq(10, ncol(sel_sub_mn_mt2), by = 10))
+        
+        ## https://book.ncrnalab.org/teaching/part-iv.-machine-learning/2.machine-learning-with-r
+        rfFuncs$summary <- twoClassSummary 
+        rfectrl <- rfeControl(functions=rfFuncs,
+                              method="repeatedcv",
+                              repeats = 5,
+                              saveDetails = T)
+        rfe.results <- rfe(x = ncl_df, 
+                           y = as.factor(sel_sub_mn_mt$group), 
+                           sizes = my_size,
+                           rfeControl=rfectrl,
+                           metric = "ROC")
+        
+        # prepare training scheme
+        control <- trainControl(method="repeatedcv",
+                                repeats=5)
+        # train the model
+        sel_sub_mn_mt3 <- cbind.data.frame(
+          group = sel_sub_mn_mt$group %>% as.factor(),
+          sel_sub_mn_mt2)
+        model <- train(group ~ ., 
+                       data=sel_sub_mn_mt3, 
+                       method="rf", 
+                       preProcess="scale",
+                       trControl=control)
+        # estimate variable importance
+        importance <- varImp(model, scale=FALSE)
+        feature_train_list[[kd]][[sub_can]][["rfe.results"]] <- rfe.results
+        feature_train_list[[kd]][[sub_can]][["model"]] <- model
+        feature_train_list[[kd]][[sub_can]][["importance"]] <- importance
+      }
+    }
+    
+    for (sub_can in cancer_list) {
+      sub_meta <- bICI_ds_list$k__Bacteria$sample_table %>%
+        subset(., rownames(.) %in%
+                 rownames(bICI_ds_list$k__Eukaryota$sample_table))
+  
+      sel_sub_mn_mt <- cbind.data.frame(group = sub_meta[[comp_group]], # combine the group information
+                                        sub_group = sub_meta[[sub_group]]) %>%
+        cbind.data.frame(., med_nor_list$k__Bacteria$sel_mn_df[sel_cand_list$k__Bacteria, rownames(sub_meta)]%>% t()) %>%
+        cbind.data.frame(., med_nor_list$k__Eukaryota$sel_mn_df[sel_cand_list$k__Eukaryota, rownames(sub_meta)]%>% t()) %>%
+        filter(sub_group == sub_can)
+  
+      if (nrow(sel_sub_mn_mt) <= 20){ # HCC only have 7 samples
+        message("All in ", sub_can, " (", nrow(sel_sub_mn_mt), ") is less than 20, and filter it.")
+        next
+      }else{
+        message("All in ", sub_can, " start at ", date())
+      }
+  
+      sel_sub_mn_mt2 <- subset(sel_sub_mn_mt, # only select the otu features
+                               select = -c(group, sub_group)) %>%
+        as.matrix()
+      class(sel_sub_mn_mt2) <- "numeric" # covnert the character to numeric
+  
+      sel_sub_mn_mt2 %<>% .[, -which.min(apply(.,2,sd))]
+  
+      sel_sub_mn_mt2 %<>% .[, apply(sel_sub_mn_mt2, 2, function(x) MyFreq(x)[1,2]) < nrow(sel_sub_mn_mt2)/2]
+  
+      if (findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8) %>% length() == 0) {
+        ncl_df <- sel_sub_mn_mt2
+      }else{
+        ncl_df <- sel_sub_mn_mt2[, -findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8)] # remove the correlation factors
+      }
+      # ncl_df2 <- cbind.data.frame(group = as.factor(sel_sub_mn_mt$group), ncl_df)
+      if(ncol(ncl_df) == 0) next
+      set.seed(myseed)
+      my_size <- c(1:ncol(ncl_df))
+      # my_size <- c(1, seq(10, ncol(sel_sub_mn_mt2), by = 10))
+      rfFuncs$summary <- twoClassSummary
+      rfectrl <- rfeControl(functions=rfFuncs,
+                            method="repeatedcv",
+                            repeats = 5,
+                            saveDetails = T)
+      rfe.results <- rfe(x = ncl_df,
+                         y = as.factor(sel_sub_mn_mt$group),
+                         sizes = my_size,
+                         rfeControl=rfectrl,
+                         metric = "ROC")
+  
+      # prepare training scheme
+      control <- trainControl(method="repeatedcv",
+                              repeats=5)
+      # train the model
+      sel_sub_mn_mt3 <- cbind.data.frame(
+        group = sel_sub_mn_mt$group %>% as.factor(),
+        sel_sub_mn_mt2)
+      model <- train(group ~ .,
+                     data=sel_sub_mn_mt3,
+                     method="rf",
+                     preProcess="scale",
+                     trControl=control)
+      # estimate variable importance
+      importance <- varImp(model, scale=FALSE)
+      feature_train_list[["All"]][[sub_can]][["rfe.results"]] <- rfe.results
+      feature_train_list[["All"]][[sub_can]][["model"]] <- model
+      feature_train_list[["All"]][[sub_can]][["importance"]] <- importance
+    }
+    message("seed = ", myseed, " has finished at ", date())
+    saveRDS(object = feature_train_list,
+            file = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/Seed_RDS/",
+                          "feature_train_list-", myseed, '.rds'))
+    return()
+  }
+  
+  gc()
+  message("start at ", date(), ".")
+  # no_cores <- detectCores() - 1  
+  no_cores <- 10
+  cl <- makeCluster(no_cores)  
+  registerDoParallel(cl)  
+  # seed_feature_train_list <- foreach(i=1:10) %dopar% train_rf_seed(i)
+  seed_feature_train_list2 <- foreach(i=21:200) %dopar% train_rf_seed(i)
+  stopCluster(cl)  
+  message("end at ", date(), ".")
+  gc()
+  
+  
+  seed_feature_sub1 <- matrix(data = NA, nrow = 0, ncol = 8) %>%
+    as.data.frame() %>%
+    set_colnames(c("Seed","Variables", "ROC", "Sens", "Spec", "ROCSD", "SensSD", "SpecSD"))
+  
+  seed_feature_sub2 <- list(MM = seed_feature_sub1,
+                            NSCLC = seed_feature_sub1,
+                            RCC = seed_feature_sub1)
+  
+  
+  
+  seed_feature_top_list <- list(k__Bacteria = seed_feature_sub2,
+                                k__Eukaryota = seed_feature_sub2,
+                                All = seed_feature_sub2)
+  
+  
+  
+  seed_feature_combine_list <- seed_feature_top_list
+  
+  ## calculate the roc line curves
+  for (myseed in 1:200) {
+    tmp_rds <- readRDS(paste0(save_path_prefix, "07.Classifier/RF/Seed_RDS/",
+                              "feature_train_list-", myseed, 'rds.rds'))
+    for (sub_kingdom in names(tmp_rds)) {
+      for (sub_cancer in names(tmp_rds[[sub_kingdom]])) {
+        tmp_df <- tmp_rds[[sub_kingdom]][[sub_cancer]]$rfe.results$results %>% arrange(desc(ROC))
+        seed_feature_combine_list[[sub_kingdom]][[sub_cancer]] <- rbind.data.frame(
+          seed_feature_combine_list[[sub_kingdom]][[sub_cancer]], 
+          cbind.data.frame(seed = myseed, tmp_df))
+        
+        seed_feature_top_list[[sub_kingdom]][[sub_cancer]] <- rbind.data.frame(
+          seed_feature_top_list[[sub_kingdom]][[sub_cancer]], 
+          cbind.data.frame(seed = myseed, tmp_df %>% slice(1:1)))
+        
+      }
+    }
+    message(myseed, " has finished at ", date())
+  }
+  
+  
+  
+  
+  ## calculate the mean ROC for ROC curve
+  seed_feature_combine_list2 <- list()
+  seed_feature_summary <- list()
+  for (kd in names(seed_feature_combine_list)) {
+    for (sub_can in names(seed_feature_combine_list[[kd]])) {
+      seed_feature_combine_list2[[sub_can]][[kd]] <- seed_feature_combine_list[[kd]][[sub_can]]
+      seed_feature_summary[[sub_can]][[kd]] <- seed_feature_combine_list[[kd]][[sub_can]] %>%
+        group_by(Variables) %>%
+        summarise(mROC = mean(ROC),
+                  sd = sd(ROC),
+                  n = n(),
+                  se = sd/sqrt(n))
+    }
+  }
+  
+  seed_feature_top_list2 <- list()
+  for (kd in names(seed_feature_top_list)) {
+    for (sub_can in names(seed_feature_top_list[[kd]])) {
+      seed_feature_top_list2[[sub_can]][[kd]] <- seed_feature_top_list[[kd]][[sub_can]]
+    }
+  }
+  
+  saveRDS(object = seed_feature_combine_list2, 
+          file = FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                            Prefix = "seed_feature_combine_list2", Suffix = "rds"))
+  saveRDS(object = seed_feature_combine_list, 
+          file = FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                            Prefix = "seed_feature_combine_list", Suffix = "rds"))
+  saveRDS(object = seed_feature_summary, 
+          file = FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                            Prefix = "seed_feature_summary", Suffix = "rds"))
+}else{
+  seed_feature_combine_list <- readRDS("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/2023-04-12-seed_feature_combine_list-v1.0.rds")
+  seed_feature_combine_list2 <- readRDS("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/2023-04-12-seed_feature_combine_list2-v1.0.rds")
+  seed_feature_summary <- readRDS("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/2023-04-12-seed_feature_summary-v1.0.rds")
+}
+
+if (cal_or_not) {
+  ### for importance index
+  my_imp_tmp <- matrix(data = NA, nrow = 0, ncol = 5) %>% 
+    as.data.frame() %>%
+    set_colnames(c("FullNames", "Kingdom", "ShortName", "Seed", "ImpIdx"))
+  
+  
+  my_imp_tmp2 <- list(MM = my_imp_tmp,
+                     NSCLC = my_imp_tmp,
+                     RCC = my_imp_tmp)
+  
+  my_imp_list <- list(k__Bacteria = my_imp_tmp2,
+                     k__Eukaryota = my_imp_tmp2,
+                     All = my_imp_tmp2)
+  
+  for (myseed in 1:200) {
+    tmp_rds <- readRDS(paste0(save_path_prefix, "07.Classifier/RF/Seed_RDS/",
+                              "feature_train_list-", myseed, 'rds.rds'))
+    for (sub_kingdom in names(tmp_rds)) {
+      for (sub_cancer in names(tmp_rds[[sub_kingdom]])) {
+        tmp_df <- tmp_rds[[sub_kingdom]][[sub_cancer]]$importance$importance %>% arrange(desc(Overall))
+        rownames(tmp_df) <- gsub(pattern = "\\`", replacement = "", x = rownames(tmp_df))
+        my_imp_list[[sub_kingdom]][[sub_cancer]] <- rbind.data.frame(
+          my_imp_list[[sub_kingdom]][[sub_cancer]],
+          data.frame(FullNames = rownames(tmp_df),
+                        Kingdom = ShortKingdom(rownames(tmp_df)),
+                        ShortName = ShortName(rownames(tmp_df)),
+                        Seed = rep(myseed, nrow(tmp_df)),
+                        ImpIdx = tmp_df$Overall))
+      }
+    }
+    message(myseed, " has finished at ", date())
+  }
+  
+  View(my_imp_list$All$NSCLC)
+  
+  
+  ## for candidates from best model in 200 seeds
+  freq_tmp <- list(MM = c(),
+                   NSCLC = c(), 
+                   RCC = c())
+  
+  freq_list <- list(k__Bacteria = freq_tmp,
+                    k__Eukaryota = freq_tmp,
+                    All = freq_tmp)
+  for (myseed in 1:200) {
+    tmp_rds <- readRDS(paste0(save_path_prefix, "07.Classifier/RF/Seed_RDS/",
+                              "feature_train_list-", myseed, 'rds.rds'))
+    for (sub_kingdom in names(tmp_rds)) {
+      for (sub_cancer in names(tmp_rds[[sub_kingdom]])) {
+        freq_list[[sub_kingdom]][[sub_cancer]] <- c(
+          freq_list[[sub_kingdom]][[sub_cancer]], 
+          tmp_rds[[sub_kingdom]][[sub_cancer]]$rfe.results$optVariables)
+      }
+    }
+    message(myseed, " has finished at ", date())
+  }
+  
+  
+  ## table the features
+  table_list <- freq_list
+  for (sub_kingdom in names(tmp_rds)) {
+    for (sub_cancer in names(tmp_rds[[sub_kingdom]])) {
+      table_list[[sub_kingdom]][[sub_cancer]] <- freq_list[[sub_kingdom]][[sub_cancer]] %>%
+        table() %>% as.data.frame() %>% arrange(desc(Freq)) %>% set_colnames(c("Feature", "Frequence"))
+    }
+  }
+  
+  my_imp_summary <- list()
+  p_imp_list <- list()
+  for (sub_kingdom in names(my_imp_list)) {
+    for (sub_cancer in names(my_imp_list[[sub_kingdom]])) {
+      fil_num <- (seed_feature_summary[[sub_cancer]][[sub_kingdom]] %>% 
+                    arrange(desc(mROC)))[1,1] %>%
+        as.numeric()
+      my_imp_summary[[sub_kingdom]][[sub_cancer]] <- my_imp_list[[sub_kingdom]][[sub_cancer]] %>%
+        group_by(ShortName, FullNames, Kingdom, .add = T) %>%
+        summarise(mean_ImpIdx = mean(ImpIdx),
+                  sd_ImpIdx = sd(ImpIdx)) %>%
+        arrange(mean_ImpIdx) %>%
+        merge(x = .,
+              y = table_list[[sub_kingdom]][[sub_cancer]],
+              by.x = 'FullNames',
+              by.y = 'Feature') %>%
+        mutate(rank_freq = rank(desc(Frequence), ties.method = "min"),
+               rank_idx = rank(desc(mean_ImpIdx), ties.method = "min")) %>%
+        filter(rank_freq <= fil_num | rank_idx <= fil_num) %>%
+        arrange(mean_ImpIdx) %>%
+        mutate(ShortName = factor(ShortName, levels = ShortName))
+    }
+  }
+  
+  my_imp_summary_rds <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/ImpIdx"),
+                                   Prefix = "my_imp_summary", Suffix = "rds")
+  
+  saveRDS(object = my_imp_summary, file = my_imp_summary_rds)
+  
+  for (kd in names(my_imp_summary)) {
+    for (sub_can in names(my_imp_summary[[kd]])) {
+      sub_df <- my_imp_summary[[kd]][[sub_can]]
+      sub_csv <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/ImpIdx/table"),
+                            Prefix = paste('Summary', kd, sub_can, sep = "-"), Suffix = "csv")
+      write.csv(x = sub_df, file = sub_csv)
+    }
+  }
+}else{
+  my_imp_summary <- readRDS("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/ImpIdx/2023-04-18-my_imp_summary-v1.0.rds")
+}
+```
+
+### parameter adjust
+
+```{r parameters adjust}
+if (cal_or_not) {
+  trControl <- trainControl(method="repeatedcv", 
+                            repeats=5, 
+                            search="grid")
+  
+  tuneGrid <- expand.grid(mtry=c(3, 10, 20, 50, 100, 300, 
+                                 700, 1000, 2000, 5000, 10000))
+  
+  myseed <- 1
+  set.seed(myseed)
+  
+  best_panel <- list(c("MM", "k__Eukaryota"),
+                     c("NSCLC", "All"),
+                     c("RCC", "All"))
+  
+  ntree_list <- c(seq(100, 900, 100), seq(1000, 10000, 1000))
+  # ntree_list <- c(100,200)
+  
+  # https://zhuanlan.zhihu.com/p/352793220
+  
+  rfFit_function <- function(myseed){
+    require(randomForest)
+    require(mlbench)
+    require(magrittr)
+    require(dplyr)
+    require(tidyverse)
+    require(caret)
+    rfFit.df <- matrix(data = NA, nrow = 0, ncol = 6) %>%
+      as.data.frame() %>%
+      set_colnames(c('Kingdom', 'CancerType', 'seed', 'ntree', 'mtry', 'ROC'))
+    best_panel <- list(c("MM", "k__Eukaryota"),
+                       c("NSCLC", "All"),
+                       c("RCC", "All"))
+    ntree_list <- c(seq(100, 900, 100), seq(1000, 10000, 1000))
+    for (sub_panel in best_panel) {
+      kd <- sub_panel[2]
+      sub_can <- sub_panel[1]
+      cand_list <- my_imp_summary[[kd]][[sub_can]]$FullNames
+      if(sub_panel[2] != "All"){
+        sub_meta <- bICI_ds_list[[kd]]$sample_table # get the sub kingdom meta information
+        sub_mn_mt <- med_nor_list[[kd]]$sel_mn_df[sel_cand_list[[kd]], rownames(sub_meta)] # get the median normalization matrix
+        myData <- cbind.data.frame(group = sub_meta[[comp_group]], # combine the group information
+                                 sub_group = sub_meta[[sub_group]]) %>%
+        cbind.data.frame(., sub_mn_mt%>% t()) %>%
+          filter(sub_group == sub_can) %>%
+          subset(select = -c(sub_group))
+      }else{
+         sub_meta <- bICI_ds_list$k__Bacteria$sample_table %>%
+           subset(., rownames(.) %in%
+                    rownames(bICI_ds_list$k__Eukaryota$sample_table))
+         
+         myData <- cbind.data.frame(group = sub_meta[[comp_group]], # combine the group information
+                                    sub_group = sub_meta[[sub_group]]) %>%
+           cbind.data.frame(., med_nor_list$k__Bacteria$sel_mn_df[sel_cand_list$k__Bacteria, rownames(sub_meta)]%>% t()) %>%
+           cbind.data.frame(., med_nor_list$k__Eukaryota$sel_mn_df[sel_cand_list$k__Eukaryota, rownames(sub_meta)]%>% t()) %>%
+           filter(sub_group == sub_can) %>%
+           subset(select = -c(sub_group))
+         
+      }
+      myData <- myData[, c("group", cand_list)]
+      control <- trainControl(method="repeatedcv",
+                              repeats=5,
+                              summaryFunction=twoClassSummary, 
+                              classProbs=T,
+                              savePredictions = T)
+      tuneGrid <- expand.grid(mtry=c(1:length(cand_list)))
+      ## train the ntree
+      for (ntree in ntree_list) {
+        set.seed(myseed)
+        rfFit <- train(group ~.,
+                       data = myData,
+                       tuneGrid = tuneGrid,
+                       method = 'rf',
+                       preProcess="scale",
+                       trControl=control,
+                       ntree = ntree,
+                       metric = "ROC")
+        rfFit.res <- rfFit$results %>%
+          arrange(desc(ROC)) %>%
+          slice(1) %>%
+          subset(select = c(mtry, ROC)) 
+        rfFit.df <- rbind.data.frame(rfFit.df,
+          cbind.data.frame(Kingdom = kd,
+                           CancerType = sub_can,
+                           seed = myseed,
+                           ntree = ntree,
+                           rfFit.res))
+        
+        saveRDS(object = rfFit,
+                file = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/",
+                            "rfFit.res-seed_", myseed, "-ntree_", ntree, "-" , kd, "-", sub_can, '.rds'))
+      
+      }
+    }
+    return(rfFit.df)
+  }
+  
+  gc()
+  message("start at ", date(), ".")
+  # no_cores <- detectCores() - 1  
+  no_cores <- 10
+  cl <- makeCluster(no_cores)  
+  registerDoParallel(cl)  
+  # seed_feature_train_list <- foreach(i=1:10) %dopar% train_rf_seed(i)
+  # rfFit_res_all <- foreach(i=1:50) %dopar% rfFit_function(i)
+  # rfFit_res_all <- foreach(i=11:50) %dopar% rfFit_function(i)
+  rfFit_res_all <- foreach(i=1:50) %dopar% rfFit_function(i)
+  stopCluster(cl)  
+  message("end at ", date(), ".")
+  gc()
+  
+  
+  rfFit_res_all_rds <- FileCreate(DirPath = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/"),
+                                  Prefix = "rfFit_res_all", Suffix = '.rds')
+  
+  saveRDS(object = rfFit_res_all, file = rfFit_res_all_rds)
+  
+  rfFit.df <- do.call(rbind.data.frame, rfFit_res_all) %>%
+    arrange( CancerType, desc(ROC))
+  
+  rfFit_summary <- rfFit.df %>%
+        group_by(Kingdom, CancerType, ntree) %>%
+        summarise(mROC = mean(ROC),
+                  sd = sd(ROC),
+                  n = n(),
+                  se = sd/sqrt(n)) %>%
+    mutate(re_X_axis = rank(ntree)) %>%
+    transform(Max = ave(.$mROC, .$CancerType, FUN = max))
+  
+  rfFit_summary_csv <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/rfFit_res/table"),
+                                  Prefix = 'rfFit_summary', Suffix = "csv")
+  write.csv(x = rfFit_summary, file = rfFit_summary_csv) 
+}else{
+  rfFit_summary <- read.csv(file = "../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/table/2023-04-18-rfFit_summary-v1.0.csv")
+}
+
+```
+
+if err: `Error in summary.connection(connection) : invalid connection`
+
+solve with [link](https://blog.csdn.net/weixin_43217641/article/details/125856538)
+`env <- foreach:::.foreachGlobals`
+`rm(list=ls(name=env), pos=env)`
+
+### feature selection plot
+
+```{r feature selection plot}
+
+tax_col2 <- tax_col
+# tax_col2["All"] <- "seagreen"
+tax_col2["All"] <- "slategray"
+
+
+### line plot
+p_list <- list()
+for (sub_can in names(seed_feature_summary)) {
+  p <- ggplot() + theme_bw()
+  for (kd in names(seed_feature_summary[[sub_can]])) {
+    rfe_res_df <- seed_feature_summary[[sub_can]][[kd]] %>%
+      mutate(Max = ifelse(.$mROC == max(.$mROC), 'max', 'ns'))
+    p <- p + 
+      geom_line(data = rfe_res_df, col = tax_col2[kd], 
+                linewidth = ifelse(kd == "All", 1, 0.5),
+                aes(x = Variables, y = mROC)) + 
+      geom_ribbon(data = rfe_res_df,
+                  aes(ymin = mROC - sd, 
+                      ymax = mROC + sd, 
+                      x = Variables),
+                  fill = tax_col2[kd],
+                  alpha = .2) + 
+      geom_point(data = rfe_res_df,
+                 aes(x = Variables, y = mROC), col = tax_col2[kd])+
+      geom_point(data = rfe_res_df %>% filter(Max == "max"),
+                 aes(x = Variables, y = mROC), size = 2.5,
+                 shape=21, fill="white", color="darkblue")
+      
+  }
+  p_list[[sub_can]] <- p
+}
+
+p_list$MM
+
+line_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                       Prefix = "feature-num-selection", Suffix = "pdf")
+
+pdf(file = line_pdf, width = 10, height = 5)
+plot(p_list$MM + ggtitle("MM"))
+plot(p_list$NSCLC + ggtitle("NSCLC"))
+plot(p_list$RCC + ggtitle("RCC"))
+dev.off()
+saveRDS(object = p_list, 
+        file = FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                          Prefix = "p_list-ggplot", Suffix = "rds"))
+
+
+### Box plot
+roc_comb_list <- list()
+my_box_list <- list()
+for (sub_can in names(seed_feature_combine_list2)) {
+  roc_comb_list[[sub_can]] <- matrix(data = NA, nrow = 0, ncol = 2) %>%
+    set_colnames(c("Kingdom", "ROC"))
+  for (sub_kingdom in names(seed_feature_combine_list2[[sub_can]])) {
+    roc_comb_list[[sub_can]] <- rbind.data.frame(
+      roc_comb_list[[sub_can]],
+      cbind.data.frame(
+        Kingdom = sub_kingdom,
+        ROC = seed_feature_combine_list2[[sub_can]][[sub_kingdom]]$ROC
+      )
+    )
+  }
+  my_comparisons <- list(c("All", "k__Bacteria"),
+                         c("All", "k__Eukaryota"),
+                         c("k__Eukaryota", "k__Bacteria"))
+  my_box_list[[sub_can]] <- ggplot(data = roc_comb_list[[sub_can]],
+                                   aes(x = Kingdom, y = ROC)) + 
+    geom_boxplot(notch=T, 
+                 outlier.colour = NA,
+                 aes(fill = Kingdom),
+                 alpha = 0.3) + 
+    scale_fill_manual(values = tax_col2) + 
+    theme_bw() + 
+    ggtitle(sub_can)+
+    stat_compare_means(comparisons = my_comparisons, 
+                       label = "p.signif",
+                       method = "wilcox.test")
+}
+
+box_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                      Prefix = "boxplot-feature-num-selection", Suffix = "pdf")
+
+pdf(file = box_pdf, width = 5, height = 5)
+plot(my_box_list$MM)
+plot(my_box_list$NSCLC)
+plot(my_box_list$RCC)
+dev.off()
+saveRDS(object = my_box_list, 
+        file = FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                          Prefix = "my_box_list-ggplot", Suffix = "rds"))
+
+### err bar plot
+
+for (sub_kingdom in names(my_imp_list)) {
+  for (sub_cancer in names(my_imp_list[[sub_kingdom]])) {
+    p <- ggplot(data = my_imp_summary[[sub_kingdom]][[sub_cancer]],
+                aes(x = ShortName, y = mean_ImpIdx)) +
+      geom_bar(stat="identity", position=position_dodge(),
+               aes(fill = Frequence), col = "black",
+               # aes(col = Frequence), fill = "white", 
+               width = .75, alpha = 0.8) +
+      geom_errorbar(aes(ymin = mean_ImpIdx - sd_ImpIdx,
+                        ymax = mean_ImpIdx + sd_ImpIdx),
+                    width = .3) + 
+      theme_minimal() +
+      # theme(axis.text.y = element_text(color = tax_col[my_imp_summary[[sub_kingdom]][[sub_cancer]]$Kingdom])) + 
+      coord_flip() + 
+      scale_y_continuous(expand = c(0,0)) +
+      # scale_fill_distiller(palette = "Spectral", limits = c(0, 200)) +
+      # scale_color_distiller(palette = "Spectral", limits = c(0, 200)) +
+      scale_fill_distiller(palette = "Reds", direction = 1,  limits = c(0, 200)) +
+      ggtitle(paste(sub_kingdom, " + ", sub_cancer))
+    
+    
+    p_imp_list[[sub_kingdom]][[sub_cancer]] <- p
+    
+    imp_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/ImpIdx"),
+                          Prefix = paste0("Important-Index-", sub_kingdom, "-", sub_cancer), Suffix = "pdf")
+    pdf(file = imp_pdf, height = nrow(my_imp_summary[[sub_kingdom]][[sub_cancer]]), width = 10)
+    plot(p)
+    plot( p + theme(text = element_blank(), legend.position = 'none'))
+    dev.off()
+    
+  }
+}
+
+
+saveRDS(object = p_imp_list, 
+        file = FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                          Prefix = "err-bar-ggplot", Suffix = "rds"))
+
+
+
+### line plot for rf parameters
+
+para_col <- c(MM = "#5bd1d7",
+              NSCLC = "#348498",
+              RCC = "#004d61")
+
+ntree_list <- c(seq(100, 900, 100), seq(1000, 10000, 1000))
+p <- ggplot(data = rfFit_summary,
+            aes(x = re_X_axis, y = mROC)) +
+  geom_line(aes(col = CancerType)) +
+  geom_ribbon(aes(ymin = mROC - sd,
+                  ymax = mROC + sd,
+                  fill = CancerType),
+              alpha = .2) +
+  geom_point(aes(col = CancerType)) + 
+  geom_point(data = rfFit_summary %>% filter(Max == mROC),
+             aes(x = re_X_axis, y = mROC), size = 2.5,
+             shape=21, fill="white", color="darkblue") + 
+  scale_colour_manual(values = para_col)+ 
+  scale_fill_manual(values = para_col)+ 
+  theme_bw() +
+  scale_x_continuous(NULL, breaks = 1:19, labels = ntree_list)
+
+ntree_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF"),
+                        Prefix = "ntree-selection", Suffix = "pdf")
+pdf(file = ntree_pdf, width = 10, height = 4)
+plot(p)
+plot(p + theme(text = element_blank(), legend.position = 'none'))
+dev.off()
+
+```
+
+
+
+
+## Validation Cohorts performance
+
+Repeated Cross Validation, final Model and ROC curves:
+
+[Method 1](https://stats.stackexchange.com/questions/195264/repeated-crossvalidation-finalmodel-and-roc-curves).
+
+[Method 2](https://stackoverflow.com/questions/31138751/roc-curve-from-training-data-in-caret) √
+```{r pICI performance}
+save_or_not <- T
+
+kd <- "k__Bacteria"
+# View(pICI_mn_list[[kd]]) # example for median normalization
+
+################# before ICI treatment #################
+bICI_mn_list[["All"]] <- bind_rows(list(bICI_mn_list$k__Bacteria,
+                                        bICI_mn_list$k__Eukaryota)) %>%
+  select_if(~ !any(is.na(.)))
+dim(bICI_mn_list[["All"]])
+
+bICI_meta <- list(All = bICI_ds_list$all$sample_table[colnames(bICI_mn_list[["All"]]),],
+                  k__Eukaryota = bICI_ds_list$k__Eukaryota$sample_table)
+
+
+################# paired ICI treatment #################
+
+pICI_mn_list[["All"]] <- bind_rows(list(pICI_mn_list$k__Bacteria,
+                                        pICI_mn_list$k__Eukaryota)) %>%
+  select_if(~ !any(is.na(.)))
+dim(pICI_mn_list[["All"]])
+# [1] 2811  139
+
+pICI_meta <- list(All = pICI_ds$all$sample_table[colnames(pICI_mn_list[["All"]]),],
+                  k__Eukaryota = pICI_ds$k__Eukaryota$sample_table)
+
+
+################# independent ICI treatment #################
+iICI_mn_list[["All"]] <- bind_rows(list(iICI_mn_list$k__Bacteria,
+                                        iICI_mn_list$k__Eukaryota)) %>%
+  select_if(~ !any(is.na(.)))
+dim(iICI_mn_list[["All"]])
+
+iICI_meta <- list(All = iICI_ds$all$sample_table[colnames(iICI_mn_list[["All"]]),],
+                  k__Eukaryota = iICI_ds$k__Eukaryota$sample_table)
+
+
+best_panel <- list(c("MM", "k__Eukaryota"),
+                   c("NSCLC", "All"),
+                   c("RCC", "All"))
+best_rfFit_summary <- rfFit_summary %>% filter(mROC == Max)
+
+
+for (sub_panel in best_panel) {
+  sub_can <- sub_panel[1]
+  kd <- sub_panel[2]
+  ntree <- best_rfFit_summary %>%
+    filter(CancerType == sub_can) %>%
+    subset(select = "ntree") %>% 
+    unlist() %>% as.numeric()
+  roc_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/AUROC"),
+                        Prefix = paste("ROC", "ntree", ntree,
+                                       "Kingdom", kd, sub_can, sep = "-"),
+                        Suffix = "pdf")
+  pdf(file = roc_pdf, width = 10, height = 10)
+  all_roc_plot <- list()
+  
+  for (myseed in 1:50) {
+    roc_plot <- list()
+    
+    # for model and discovery cohort
+    rfFit.res <- readRDS(paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/",
+                          "rfFit.res-seed_", myseed, "-ntree_", ntree, "-" , kd, "-", sub_can, '.rds'))
+    sub_cand <- colnames(rfFit.res$trainingData)[-1]
+    # method 1
+    # roc_plot[["d"]] <- roc(as.numeric(rfFit.res$trainingData$.outcome=='R'),
+    #                        aggregate(R~rowIndex,rfFit.res$pred,mean)[,'R'],
+    #                        legacy.axes = T, percent = T)
+    
+    # method 2
+    evalm.res <- evalm(rfFit.res, showplots = F)
+    roc_plot[["d"]] <- roc(evalm.res$proc$data$obs, 
+                          evalm.res$proc$data$R,
+                          legacy.axes = T, percent = T)
+    
+    
+    # for paired ICI
+    p_valid_mn_df <- pICI_mn_list[[kd]] %>%
+      subset(select = rownames(pICI_meta[[kd]] %>% 
+                                 filter(Disease == sub_can))) %>%
+      t() %>% as.data.frame() %>%
+      subset(select = sub_cand)
+    p_sub_meta <- pICI_meta[[kd]][rownames(p_valid_mn_df), ] 
+    
+    p_pred <- stats::predict(rfFit.res, newdata=p_valid_mn_df, type = 'prob')[,2]
+    roc_plot[["p"]] <- roc(p_sub_meta$Response, p_pred, 
+                           legacy.axes = T, percent = T)
+    
+    # for independent ICI
+    i_valid_mn_df <- iICI_mn_list[[kd]] %>%
+      subset(select = rownames(iICI_meta[[kd]] %>% filter(Disease == sub_can))) %>%
+      t() %>% as.data.frame() %>%
+      subset(select = sub_cand)
+    i_sub_meta <- iICI_meta[[kd]][rownames(i_valid_mn_df), ]
+    i_pred <- stats::predict(rfFit.res, newdata=i_valid_mn_df, type = 'prob')[,2]
+    roc_plot[["i"]] <- roc(i_sub_meta$Response,
+                           i_pred, 
+                           legacy.axes = T, percent = T)
+    roc_value <- lapply(roc_plot, function(x) x$auc %>% round(., 2)) %>% unlist()
+    roc_value['ave'] <- mean(roc_value) %>%round(., 2)
+    roc_value['val_ave'] <- mean(roc_value[c(2,3)]) %>%round(., 2)
+    plot(roc_plot[['d']], col = '#ff502f', lwd = 2, legacy.axes = T,
+         xlab = "False Postive Percentage", ylab = "True Postive Percentage")
+    text(50, 1,(paste(roc_value, collapse = "-")))
+    lines(roc_plot[['p']], col ='#5bd1d7', lwd = 1.5)
+    lines(roc_plot[['i']], col = '#004d61', lwd = 1.5)
+    roc_plot[["value"]] <- roc_value
+    all_roc_plot[[myseed]] <- roc_plot
+  }
+  dev.off()
+  
+}
+
+### manual selected the best seeds
+
+
+
+best_panel2 <- list(c("MM", "k__Eukaryota", 33),
+                   c("NSCLC", "All", 36),
+                   c("RCC", "All", 7))
+best_rfFit_summary <- rfFit_summary %>% filter(mROC == Max)
+
+roc_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/AUROC"),
+                      Prefix = "AUROC-manual-selected-seeds",
+                      Suffix = "pdf")
+
+pdf(file = roc_pdf, width = 10, height = 10)
+
+
+all_roc_res <- list()
+for (sub_panel in best_panel2) {
+  sub_can <- sub_panel[1]
+  kd <- sub_panel[2]
+  myseed <- sub_panel[3]
+  ntree <- best_rfFit_summary %>%
+    filter(CancerType == sub_can) %>%
+    subset(select = "ntree") %>% 
+    unlist() %>% as.numeric()
+  
+  roc_plot <- list()
+
+  # for model and discovery cohort
+  rfFit.res <- readRDS(paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/",
+                        "rfFit.res-seed_", myseed, "-ntree_", ntree, "-" , kd, "-", sub_can, '.rds'))
+  sub_cand <- colnames(rfFit.res$trainingData)[-1]
+  # method 1
+  # roc_plot[["d"]] <- roc(as.numeric(rfFit.res$trainingData$.outcome=='R'),
+  #                        aggregate(R~rowIndex,rfFit.res$pred,mean)[,'R'],
+  #                        legacy.axes = T, percent = T)
+
+  # method 2
+  evalm.res <- evalm(rfFit.res, showplots = F)
+  roc_plot[["d"]] <- roc(evalm.res$proc$data$obs,
+                         evalm.res$proc$data$R,
+                         legacy.axes = T, percent = T)
+  # plot histogram for ROAUC
+  # hist_df <- data.frame(obs = evalm.res$proc$data$obs,
+  #                       prob = evalm.res$proc$data$R, 
+  #                       Disease = bICI_meta$k__Eukaryota %>% filter(Disease == sub_can) %>% subset(select = Response))
+  hist_df <- evalm.res$proc$data %>%
+    rownames_to_column(., var = "rname") %>%
+    arrange(rname %>% as.numeric()) %>%
+    select(., c("obs", "R")) %>%
+    cbind.data.frame(., 
+                     bICI_meta[[kd]] %>%
+                       filter(Disease == sub_can) %>%
+                       select(., c('Cohort_name', 'Respond_detail', "Response")))
+    
+  
+  hist_plot <- gghistogram(hist_df %>%
+                             select(., c("obs", "R"))%>%
+                             rename(prob=R),
+                           x = "prob", y = "..density..",
+                           add = "mean", rug = TRUE,
+                           fill = "obs", add_density = T,
+                           palette =respond_col, bins = 30)
+  
+ 
+  
+  # for paired ICI
+  p_valid_mn_df <- pICI_mn_list[[kd]] %>%
+    subset(select = rownames(pICI_meta[[kd]] %>%
+                               filter(Disease == sub_can))) %>%
+    t() %>% as.data.frame() %>%
+    subset(select = sub_cand)
+  p_sub_meta <- pICI_meta[[kd]][rownames(p_valid_mn_df), ]
+
+  p_pred <- stats::predict(rfFit.res, newdata=p_valid_mn_df, type = 'prob')[,2]
+  roc_plot[["p"]] <- roc(p_sub_meta$Response, p_pred,
+                         legacy.axes = T, percent = T)
+
+  # for independent ICI
+  i_valid_mn_df <- iICI_mn_list[[kd]] %>%
+    subset(select = rownames(iICI_meta[[kd]] %>% filter(Disease == sub_can))) %>%
+    t() %>% as.data.frame() %>%
+    subset(select = sub_cand)
+  i_sub_meta <- iICI_meta[[kd]][rownames(i_valid_mn_df), ]
+  i_pred <- stats::predict(rfFit.res, newdata=i_valid_mn_df, type = 'prob')[,2]
+  roc_plot[["i"]] <- roc(i_sub_meta$Response,
+                         i_pred,
+                         legacy.axes = T, percent = T)
+  roc_value <- lapply(roc_plot, function(x) x$auc %>% round(., 2)) %>% unlist()
+  roc_value['ave'] <- mean(roc_value) %>%round(., 2)
+  roc_value['val_ave'] <- mean(roc_value[c(2,3)]) %>%round(., 2)
+  # plot(roc_plot[['d']], col = '#ff502f', lwd = 2, legacy.axes = T,
+  #      xlab = "False Postive Percentage", ylab = "True Postive Percentage")
+  # plot(roc_plot[['p']], col = '#5bd1d7', lwd = 2, legacy.axes = T,
+  #      xlab = "False Postive Percentage", ylab = "True Postive Percentage")
+  # plot(roc_plot[['i']], col = '#004d61', lwd = 2, legacy.axes = T,
+  #      xlab = "False Postive Percentage", ylab = "True Postive Percentage")
+  
+  data.ci2 <- imap(roc_plot, function(x,y){
+    ci.sp(x, sensitivities=seq(0, 100, 1), boot.n=100) %>% 
+      as.data.frame() %>% 
+      mutate(x = seq(0,100,1)) %>%
+      set_colnames(., c('low','median', 'high', "x")) %>%
+      mutate(group = y)
+  }) %>% do.call(rbind, .)
+  
+  my_auc_plot2 <- ggroc(roc_plot, size = 1) + 
+    theme_bw() + 
+    geom_segment(aes(x = 100, y = 0, xend = 0, yend = 100),
+                 color = "grey", linetype = 2) + 
+    geom_ribbon(data = data.ci2, 
+                aes(xmin = low, xmax = high, y = x, fill = group),
+                alpha = 0.1, inherit.aes = F) + 
+    scale_fill_manual(values = c(d = '#ff502f',
+                                 p = '#5bd1d7',
+                                 i = '#ffb549')) +
+                                 # i = '#004d61')) + 
+    scale_color_manual(values = c(d = '#ff502f',
+                                  p = '#5bd1d7',
+                                  i = '#ffb549')) +
+                                  # i = '#004d61')) +
+    theme(legend.position = "none")
+  plot(my_auc_plot2)
+  
+  roc_plot[["Delong"]] <- list(d = Compared_50AUC(auc1 = roc_plot[["d"]]),
+                               p = Compared_50AUC(auc1 = roc_plot[["p"]]),
+                               i = Compared_50AUC(auc1 = roc_plot[["i"]]))
+  roc_plot[["ci_value"]] <- list(d = ci.auc(roc_plot[["d"]]),
+                                 p = ci.auc(roc_plot[["p"]]),
+                                 i = ci.auc(roc_plot[["i"]]))
+  roc_plot[["Discovery_histogram"]] <- hist_plot
+  
+  all_roc_res[[sub_panel[1]]] <- roc_plot
+  
+}
+dev.off()
+
+
+# hist_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/AUROC"),
+#                        Prefix = "Histogram-manual-selected-seeds",
+#                        Suffix = "pdf")
+# pdf(file = hist_pdf, width = 10, height = 5)
+# plot(all_roc_res$MM$Discovery_histogram)
+# plot(all_roc_res$NSCLC$Discovery_histogram)
+# plot(all_roc_res$RCC$Discovery_histogram)
+# dev.off()
+
+all_roc_rds <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/AUROC"),
+                      Prefix = "all_roc_res-manual_selected_3Seeds",
+                      Suffix = "rds")
+saveRDS(object = all_roc_res, file = all_roc_rds)
+
+#### ADD INFORMATION
+sub_panel <- best_panel2[[1]]
+sub_can <- sub_panel[1]
+kd <- sub_panel[2]
+myseed <- sub_panel[3]
+ntree <- best_rfFit_summary %>%
+  filter(CancerType == sub_can) %>%
+  subset(select = "ntree") %>% 
+  unlist() %>% as.numeric()
+
+rfFit.res <- readRDS(paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/",
+                      "rfFit.res-seed_", myseed, "-ntree_", ntree, "-" , kd, "-", sub_can, '.rds'))
+sub_cand <- colnames(rfFit.res$trainingData)[-1]
+
+evalm.res <- evalm(rfFit.res, showplots = F)
+hist_df <- evalm.res$proc$data %>%
+    rownames_to_column(., var = "rname") %>%
+    arrange(rname %>% as.numeric()) %>%
+    select(., c("obs", "R")) %>%
+    cbind.data.frame(., 
+                     bICI_meta[[kd]] %>%
+                       filter(Disease == sub_can) %>%
+                       select(., c('Cohort_name', 'Respond_detail', "Response")))
+
+aov_res_R <- aov(R ~ Cohort_name, hist_df %>% filter(Response == 'R'))
+tuk_res_R <- TukeyHSD(aov_res_R)
+cld_R <- multcompLetters4(aov_res_R, tuk_res_R)
+dt_R <- hist_df %>% 
+  filter(Response == 'R') %>% 
+  group_by(., Cohort_name) %>%
+  summarise(w=mean(R), sd = sd(R)) %>%
+  arrange(desc(w))
+cld_R <- as.data.frame.list(cld_R$Cohort_name)
+dt_R$cld <- cld_R$Letters
+
+err_R_plot <- ggplot(dt_R, aes(Cohort_name, w)) + 
+  geom_bar(stat = "identity", fill="white", 
+           aes(col = Cohort_name), show.legend = FALSE) +
+  geom_errorbar(aes(ymin = w-sd, ymax=w+sd, col = Cohort_name),
+                width = 0.2) +
+  labs(x = "Feed Type", y = "Average Weight Gain (g)") +
+  theme_bw() + 
+  scale_color_manual(values = cohort_col) + 
+  geom_text(aes(label = cld, y = w + sd), vjust = -0.5) +
+  stat_compare_means(data= hist_df %>% 
+                       filter(Response == 'R'), aes(y = R))
+
+aov_res_NR <- aov(R ~ Cohort_name, hist_df %>% filter(Response == 'NR'))
+tuk_res_NR <- TukeyHSD(aov_res_NR)
+cld_NR <- multcompLetters4(aov_res_NR, tuk_res_NR)
+dt_NR <- hist_df %>% 
+  filter(Response == 'NR') %>% 
+  group_by(., Cohort_name) %>%
+  summarise(w=mean(R), sd = sd(R)) %>%
+  arrange(desc(w))
+cld_NR <- as.data.frame.list(cld_NR$Cohort_name)
+dt_NR$cld <- cld_NR$Letters
+
+err_NR_plot <- ggplot(dt_NR, aes(Cohort_name, w)) + 
+  geom_bar(stat = "identity", fill="white", 
+           aes(col = Cohort_name), show.legend = FALSE) +
+  geom_errorbar(aes(ymin = w-sd, ymax=w+sd, col = Cohort_name),
+                width = 0.2) +
+  labs(x = "Feed Type", y = "Average Weight Gain (g)") +
+  theme_bw() + 
+  scale_color_manual(values = cohort_col) + 
+  geom_text(aes(label = cld, y = w + sd), vjust = -0.5) + 
+  stat_compare_means(data= hist_df %>% 
+                       filter(Response == 'NR'), aes(y = R))
+
+err_bar_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/AUROC"),
+                          Prefix = "Err_Barplot-MM", Suffix = "pdf")
+pdf(file = err_bar_pdf, height = 2.5, width = 4)
+# pdf(file = err_bar_pdf, height = 25, width = 40)
+plot(err_NR_plot + theme(legend.position = "none"))
+plot(err_NR_plot + theme(legend.position = "none", text = element_blank()))
+plot(err_R_plot + theme(legend.position = "none"))
+plot(err_R_plot + theme(legend.position = "none", text = element_blank()))
+dev.off()
+
+
+```
+
+## Feature comparison in validation cohorts
+
+```{r feature comparison in validation cohorts}
+View(pICI_mn_list)
+View(pICI_meta$k__Eukaryota)
+
+
+```
+
+## End
+
+<!--
+
+
+## test
+
+```{r test}
+sub_can = "MM"
+
+rfFit.res <- readRDS(paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/",
+                            "rfFit.res-seed_33-ntree_8000-k__Eukaryota-MM.rds"))
+
+evalm.res <- evalm(rfFit.res, showplots = F)
+# 2017_Frankel
+tmp1 <- tmp_df %>% 
+  filter(Cohort_name == "2017_Frankel")
+tmp1_roc <- roc(tmp1$obs, tmp1$R)
+tmp1_ci <- ci(tmp1_roc, of = c("auc", "thresholds", "sp", "se", "coords"))
+tmp1_roc
+tmp1_ci
+# 2018_Gopalakrishnan
+tmp1 <- tmp_df %>% 
+  filter(Cohort_name == "2018_Gopalakrishnan")
+tmp1_roc <- roc(tmp1$obs, tmp1$R)
+tmp1_ci <- ci(tmp1_roc, of = c("auc", "thresholds", "sp", "se", "coords"))
+tmp1_roc
+tmp1_ci
+# 2018_Maston
+tmp1 <- tmp_df %>% 
+  filter(Cohort_name == "2018_Maston")
+tmp1_roc <- roc(tmp1$obs, tmp1$R)
+tmp1_ci <- ci(tmp1_roc, of = c("auc", "thresholds", "sp", "se", "coords"))
+tmp1_roc
+tmp1_ci
+# 2019_Peters
+tmp1 <- tmp_df %>% 
+  filter(Cohort_name == "2019_Peters")
+tmp1_roc <- roc(tmp1$obs, tmp1$R)
+tmp1_ci <- ci(tmp1_roc, of = c("auc", "thresholds", "sp", "se", "coords"))
+tmp1_roc
+tmp1_ci
+# 2021_Spencer
+tmp1 <- tmp_df %>% 
+  filter(Cohort_name == "2021_Spencer")
+tmp1_roc <- roc(tmp1$obs, tmp1$R)
+tmp1_ci <- ci(tmp1_roc, of = c("auc", "thresholds", "sp", "se", "coords"))
+tmp1_roc
+tmp1_ci
+# 2022_McCulloch
+tmp1 <- tmp_df %>% 
+  filter(Cohort_name == "2022_McCulloch")
+tmp1_roc <- roc(tmp1$obs, tmp1$R)
+tmp1_ci <- ci(tmp1_roc, of = c("auc", "thresholds", "sp", "se", "coords"))
+tmp1_roc
+tmp1_ci
+# 2022_Lee
+tmp1 <- tmp_df %>% 
+  filter(Cohort_name == "2022_Lee")
+tmp1_roc <- roc(tmp1$obs, tmp1$R)
+tmp1_ci <- ci(tmp1_roc, of = c("auc", "thresholds", "sp", "se", "coords"))
+tmp1_roc
+tmp1_ci
+
+tmp_df <- cbind.data.frame(evalm.res$proc$data %>% 
+                             rownames_to_column(., var = 'pro_rank') %>% 
+                             mutate(pro_rank = as.numeric(pro_rank)) %>% 
+                             arrange(pro_rank) %>% 
+                             subset(select = c('R', 'obs')), 
+                           bICI_meta$k__Eukaryota %>% filter(Disease == sub_can)) %>%
+  # mutate(Respond_detail2 = ifelse(Respond_detail %in% c("Dead", "PD"), "serious", "non-serious"))
+  mutate(Respond_detail2 = ifelse(Respond_detail %in% c("CR"), "CR", "non-CR"))
+
+tmp_roc <- roc(tmp_df$obs, tmp_df$R)
+tmp_ci <- ci(tmp_roc, of = c("auc", "thresholds", "sp", "se", "coords"))
+tmp_roc
+tmp_ci
+
+###
+
+
+rocobj <- plot.roc(tmp_df$obs, tmp_df$R)
+ci.sp.obj <- ci.sp(rocobj, sensitivities=seq(0, 1, .01), boot.n=100)
+plot(rocobj) # restart a new plot
+plot(ci.sp.obj, type="shape", col="blue")
+
+# Direct syntax (response, predictor):
+plot.roc(tmp_df$obs, tmp_df$R,
+         ci=TRUE, of="coords")
+
+###
+
+
+serious_plot <- ggplot(tmp_df, aes(x = Respond_detail2, y = R)) + 
+  geom_boxplot()+
+  stat_compare_means(method = "wilcox")
+
+antibio_plot <- ggplot(tmp_df[!is.na(tmp_df$Antibiotics),], 
+                       aes(x = Antibiotics, y = R)) + 
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter() +
+  stat_compare_means(method = "wilcox")
+
+pfs_plot <- ggplot(tmp_df[!(is.na(tmp_df$PFS_status)|tmp_df$PFS_status == ""),], 
+                       aes(x = PFS_status, y = R)) + 
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter() +
+  stat_compare_means(method = "wilcox")
+
+ajcc_plot <- ggplot(tmp_df[!(is.na(tmp_df$AJCC)|tmp_df$AJCC == "III/IV"),], 
+                       aes(x = AJCC, y = R)) + 
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter() +
+  stat_compare_means(method = "wilcox")
+
+gender_plot <- ggplot(tmp_df[!(is.na(tmp_df$Gender)),], 
+                       aes(x = Gender, y = R)) + 
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter() +
+  stat_compare_means(method = "wilcox")
+
+tmp_df$PFS %<>% as.numeric()
+tmp_df$RECIST %<>% as.numeric()
+spm.plot <- ggscatter(tmp_df, x = "RECIST", y = "R",
+                add = "reg.line", 
+                color = "Response",
+                add.params = list(fill = "lightgray"),
+                conf.int = T)+
+  theme(legend.position = "none") +
+  stat_cor(method = "spearman" 
+           ,aes(color = Response)
+           ) + 
+  scale_color_manual(values = respond_col)
+
+ggMarginal(spm.plot, type = "histogram", groupFill = TRUE)
+
+## https://www.r-bloggers.com/2021/05/random-forest-feature-selection/
+## Random Forest Feature Selection
+tmp_mod <- rfFit.res
+sub_cand <- colnames(rfFit.res$trainingData)[-1]
+require(Boruta)
+set.seed(111)
+boruta <- Boruta(Class ~ ., data = Sonar, doTrace = 2, maxRuns = 500)
+print(boruta)
+
+b_valid_mn_df <- bICI_mn_list[[kd]] %>%
+  subset(select = rownames(bICI_meta[[kd]] %>% 
+                             filter(Disease == sub_can))) %>%
+  t() %>% as.data.frame() %>%
+  subset(select = sub_cand)
+b_sub_meta <- bICI_meta[[kd]][rownames(b_valid_mn_df), ] 
+tmp_data <- cbind.data.frame(b_valid_mn_df, Response = as.factor(b_sub_meta$Response))
+set.seed(111)
+boruta <- Boruta(Response ~ ., data = tmp_data, doTrace = 2, maxRuns = 500)
+print(boruta)
+
+lz<-lapply(1:ncol(boruta$ImpHistory),function(i) boruta$ImpHistory[is.finite(boruta$ImpHistory[,i]),i])
+names(lz) <- colnames(boruta$ImpHistory)
+Labels <- sort(sapply(lz,median))
+
+plot(boruta, las = 4, cex.axis = 0.7)
+
+message("hahaha")
+
+
+```
+
+## Simple classifier model try
+
+```{r parameters simple classifier}
+if (cal_or_not) {
+  trControl <- trainControl(method="repeatedcv", 
+                            repeats=5, 
+                            search="grid")
+  
+  tuneGrid <- expand.grid(mtry=c(3, 10, 20, 50, 100, 300, 
+                                 700, 1000, 2000, 5000, 10000))
+  
+  myseed <- 1
+  set.seed(myseed)
+  
+  simple_cand <- Reduce(intersect,
+                        list(my_imp_summary$All$NSCLC$FullNames,
+                             my_imp_summary$All$RCC$FullNames,
+                             my_imp_summary$k__Eukaryota$MM$FullNames))
+  
+  ntree_list <- c(seq(100, 900, 100), seq(1000, 10000, 1000))
+  # ntree_list <- c(100,200)
+  
+  # https://zhuanlan.zhihu.com/p/352793220
+  
+  rfFit_function <- function(myseed){
+    require(randomForest)
+    require(mlbench)
+    require(magrittr)
+    require(dplyr)
+    require(tidyverse)
+    require(caret)
+    rfFit.df <- matrix(data = NA, nrow = 0, ncol = 6) %>%
+      as.data.frame() %>%
+      set_colnames(c('Kingdom', 'CancerType', 'seed', 'ntree', 'mtry', 'ROC'))
+    best_panel <- list(c("MM", "k__Eukaryota"),
+                       c("NSCLC", "All"),
+                       c("RCC", "All"))
+    ntree_list <- c(seq(100, 900, 100), seq(1000, 10000, 1000))
+    for (sub_panel in best_panel) {
+      kd <- sub_panel[2]
+      sub_can <- sub_panel[1]
+      cand_list <- simple_cand
+      if(sub_panel[2] != "All"){
+        sub_meta <- bICI_ds_list[[kd]]$sample_table # get the sub kingdom meta information
+        sub_mn_mt <- med_nor_list[[kd]]$sel_mn_df[sel_cand_list[[kd]], rownames(sub_meta)] # get the median normalization matrix
+        myData <- cbind.data.frame(group = sub_meta[[comp_group]], # combine the group information
+                                 sub_group = sub_meta[[sub_group]]) %>%
+        cbind.data.frame(., sub_mn_mt%>% t()) %>%
+          filter(sub_group == sub_can) %>%
+          subset(select = -c(sub_group))
+      }else{
+         sub_meta <- bICI_ds_list$k__Bacteria$sample_table %>%
+           subset(., rownames(.) %in%
+                    rownames(bICI_ds_list$k__Eukaryota$sample_table))
+         
+         myData <- cbind.data.frame(group = sub_meta[[comp_group]], # combine the group information
+                                    sub_group = sub_meta[[sub_group]]) %>%
+           cbind.data.frame(., med_nor_list$k__Bacteria$sel_mn_df[sel_cand_list$k__Bacteria, rownames(sub_meta)]%>% t()) %>%
+           cbind.data.frame(., med_nor_list$k__Eukaryota$sel_mn_df[sel_cand_list$k__Eukaryota, rownames(sub_meta)]%>% t()) %>%
+           filter(sub_group == sub_can) %>%
+           subset(select = -c(sub_group))
+         
+      }
+      myData <- myData[, c("group", cand_list)]
+      control <- trainControl(method="repeatedcv",
+                              repeats=5,
+                              summaryFunction=twoClassSummary, 
+                              classProbs=T,
+                              savePredictions = T)
+      tuneGrid <- expand.grid(mtry=c(1:length(cand_list)))
+      ## train the ntree
+      for (ntree in ntree_list) {
+        set.seed(myseed)
+        rfFit <- train(group ~.,
+                       data = myData,
+                       tuneGrid = tuneGrid,
+                       method = 'rf',
+                       preProcess="scale",
+                       trControl=control,
+                       ntree = ntree,
+                       metric = "ROC")
+        rfFit.res <- rfFit$results %>%
+          arrange(desc(ROC)) %>%
+          slice(1) %>%
+          subset(select = c(mtry, ROC)) 
+        rfFit.df <- rbind.data.frame(rfFit.df,
+          cbind.data.frame(Kingdom = kd,
+                           CancerType = sub_can,
+                           seed = myseed,
+                           ntree = ntree,
+                           rfFit.res))
+        dir.create("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF_simple/rfFit_res/", recursive = T, showWarnings = F)
+        saveRDS(object = rfFit,
+                file = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF_simple/rfFit_res/",
+                            "rfFit.res-seed_", myseed, "-ntree_", ntree, "-" , kd, "-", sub_can, '.rds'))
+      message(paste(rfFit.df[nrow(rfFit.df),], collapse = "\t"))
+      }
+    }
+    return(rfFit.df)
+  }
+  
+  gc()
+  message("start at ", date(), ".")
+  # no_cores <- detectCores() - 1  
+  no_cores <- 10
+  cl <- makeCluster(no_cores)  
+  registerDoParallel(cl)  
+  # seed_feature_train_list <- foreach(i=1:10) %dopar% train_rf_seed(i)
+  # rfFit_res_all <- foreach(i=1:50) %dopar% rfFit_function(i)
+  # rfFit_res_all <- foreach(i=11:50) %dopar% rfFit_function(i)
+  rfFit_res_all <- foreach(i=1:50) %dopar% rfFit_function(i)
+  stopCluster(cl)  
+  message("end at ", date(), ".")
+  gc()
+  
+  
+  rfFit_res_all_rds <- FileCreate(DirPath = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/"),
+                                  Prefix = "rfFit_res_all", Suffix = '.rds')
+  
+  saveRDS(object = rfFit_res_all, file = rfFit_res_all_rds)
+  
+  rfFit.df <- do.call(rbind.data.frame, rfFit_res_all) %>%
+    arrange( CancerType, desc(ROC))
+  
+  rfFit_summary <- rfFit.df %>%
+        group_by(Kingdom, CancerType, ntree) %>%
+        summarise(mROC = mean(ROC),
+                  sd = sd(ROC),
+                  n = n(),
+                  se = sd/sqrt(n)) %>%
+    mutate(re_X_axis = rank(ntree)) %>%
+    transform(Max = ave(.$mROC, .$CancerType, FUN = max))
+  
+  rfFit_summary_csv <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/rfFit_res/table"),
+                                  Prefix = 'rfFit_summary', Suffix = "csv")
+  write.csv(x = rfFit_summary, file = rfFit_summary_csv) 
+}else{
+  rfFit_summary <- read.csv(file = "../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/table/2023-04-18-rfFit_summary-v1.0.csv")
+}
+
+```
+
+
+-->
+
+
+
+
+
+
+<!--
+
+### ternary
+``{r ternary plot}
+# Ternary plot 三元图
+  
+  
+  tern_df <- cbind.data.frame(FoldChange(sub_otu = bICI_mn_list[[kd]] %>% 
+                          t() %>% subset(select = sub_cand) %>% t(), 
+                        sub_meta = bICI_meta[[kd]],
+                        sub_catolog = "Seq_type", 
+                        sub_comparison = "Response", comp_rank = c("R", "NR")) %>%
+    subset(select = "All") %>%
+    set_colnames('Discovery_FC'),
+    FoldChange(sub_otu = pICI_mn_list[[kd]] %>% 
+                          t() %>% subset(select = sub_cand) %>% t(), 
+                        sub_meta = pICI_meta[[kd]],
+                        sub_catolog = "Disease", 
+                        sub_comparison = "Response", comp_rank = c("R", "NR")) %>%
+    subset(select = sub_can) %>%
+    set_colnames('PariedValid_FC'), 
+    FoldChange(sub_otu = iICI_mn_list[[kd]] %>% 
+                          t() %>% subset(select = sub_cand) %>% t(), 
+                        sub_meta = iICI_meta[[kd]],
+                        sub_catolog = "Disease", 
+                        sub_comparison = "Response", comp_rank = c("R", "NR")) %>%
+    subset(select = sub_can) %>%
+    set_colnames('IndependenceValid_FC')) %>%
+    mutate(short_name = ShortName(rownames(.)),
+           kingdom = ShortKingdom(rownames(.)))
+  tern_df2 <- (tern_df[,c(1:3)]/matrix(rep(rowSums(tern_df[,c(1:3)]),ncol(tern_df[,c(1:3)])),nrow(tern_df[,c(1:3)]),ncol(tern_df[,c(1:3)]))) %>%
+    mutate(short_name = ShortName(rownames(.)),
+           kingdom = ShortKingdom(rownames(.)))
+  tern_plot <- ggtern(data=tern_df2, 
+                      aes(x = Discovery_FC, y = PariedValid_FC, 
+                          z = IndependenceValid_FC, label = short_name)) + 
+    geom_point(size=10, color="red") + 
+    geom_label() +
+    theme_bw() +
+    theme_nomask()
+    # theme_arrowdefault()
+
+  tern_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RF/AUROC"),
+                         Prefix = "ternery-manual-selected-seeds",
+                         Suffix = "pdf")
+  pdf(file = tern_pdf, width = 50, height = 50)
+  plot(tern_plot)
+  dev.off()
+  
+```
+```{r validation}
+ci.sp.obj <- ci.sp(roc_plot[['d']], sensitivities=seq(0, 100, 1), boot.n=100)
+
+
+my_auc_res <- ci.auc(roc_plot[['d']], conf.level = 0.9) %>%
+       round(., 2) %>%
+       paste0(., seq = '%')
+
+#  draw by plot
+plot(roc_plot[['d']], col = '#004d61', lwd = 2, legacy.axes = T,
+     xlab = "False Postive Percentage", ylab = "True Postive Percentage")
+plot(ci.sp.obj, type="shape", col=c("blue", alpha = 0.1))
+text(20, 10, paste0(my_auc_res[1], " (", my_auc_res[2], " - ", my_auc_res[3], ")"))
+
+# draw by ggplot2
+
+data.ci <- ci.sp.obj %>% 
+  as.data.frame() %>% 
+  mutate(x = seq(0,100,1)) %>%
+  set_colnames(., c('low','median', 'high', "x"))
+
+my_auc_plot <- ggroc(roc_plot[['d']], col = '#ff502f', size = 1) + 
+  theme_bw() +
+  geom_segment(aes(x = 100, y = 0, xend = 0, yend = 100),
+               color = "grey", linetype = 2) + 
+  geom_ribbon(data = data.ci, 
+              # aes(x = 100- x, ymin = low, ymax = high),
+              aes(xmin = low, xmax = high, y = x),
+              fill = '#ff502f', alpha = 0.2)
+
+
+data.ci2 <- imap(roc_plot, function(x,y){
+  ci.sp(x, sensitivities=seq(0, 100, 1), boot.n=100) %>% 
+    as.data.frame() %>% 
+    mutate(x = seq(0,100,1)) %>%
+    set_colnames(., c('low','median', 'high', "x")) %>%
+    mutate(group = y)
+}) %>% do.call(rbind, .)
+  
+my_auc_plot2 <- ggroc(roc_plot, size = 1) + 
+  theme_bw() + 
+  geom_segment(aes(x = 100, y = 0, xend = 0, yend = 100),
+               color = "grey", linetype = 2) + 
+  geom_ribbon(data = data.ci2, 
+              aes(xmin = low, xmax = high, y = x, fill = group),
+              alpha = 0.05, inherit.aes = F) + 
+  scale_fill_manual(values = c(d = '#ff502f',
+                               p = '#5bd1d7',
+                               i = '#9055A2')) + 
+  scale_color_manual(values = c(d = '#ff502f',
+                                p = '#5bd1d7',
+                                i = '#9055A2')) 
+
+```
+## The model bias cause by cohort variance.
+
+### MM
+
+```{r bias MM}
+sub_can = "MM"
+
+rfFit.res <- readRDS(paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/",
+                            "rfFit.res-seed_33-ntree_8000-k__Eukaryota-MM.rds"))
+
+evalm.res <- evalm(rfFit.res, showplots = F)
+
+
+tmp_df <- cbind.data.frame(evalm.res$proc$data %>% 
+                             rownames_to_column(., var = 'pro_rank') %>% 
+                             mutate(pro_rank = as.numeric(pro_rank)) %>% 
+                             arrange(pro_rank) %>% 
+                             subset(select = c('R', 'obs')), 
+                           bICI_meta$k__Eukaryota %>% filter(Disease == sub_can))
+
+tmp_plot <- ggplot(data = tmp_df, aes(x = Cohort_name, y = R, col = Response))+
+  geom_boxplot(position = position_dodge(width = 1), 
+               outlier.colour = NA, width = 0.6) +
+  geom_point(position=position_jitterdodge()) +
+  theme_bw() +
+  scale_color_manual(values = respond_col) +
+  stat_compare_means(method = "wilcox", 
+                     # label = "p.signif", hide.ns = T)
+                     label = "p.format")
+
+tmp_plot1 <- ggplot(data = tmp_df %>% 
+                      filter(Response == 'R'), 
+                    aes(x = Cohort_name, y = R))+
+  geom_boxplot(position = position_dodge(width = 1), 
+               outlier.colour = NA, width = 0.6, 
+               col = "#015069") +
+  geom_jitter(col = "#015069") + 
+  theme_bw() +
+  stat_compare_means(method = "anova")
+
+tmp_plot2 <- ggplot(data = tmp_df %>% 
+                      filter(Response == 'NR'), 
+                    aes(x = Cohort_name, y = R))+
+  geom_boxplot(position = position_dodge(width = 1), 
+               outlier.colour = NA, width = 0.6, 
+               col = "#C71E1D") +
+  geom_jitter(col = "#C71E1D") + 
+  theme_bw() +
+  stat_compare_means(method = "anova")
+
+spm.plot <- ggscatter(tmp_df, x = "Age", y = "R",
+                add = "reg.line", color = "Response",
+                add.params = list(fill = "lightgray"),
+                conf.int = T)+
+  theme(legend.position = "none") +
+  stat_cor(method = "spearman",
+           aes(color = Response)) + 
+  scale_color_manual(values = respond_col)
+
+ggMarginal(spm.plot, type = "histogram", groupFill = TRUE)
+
+
+```
+### NSCLC
+
+```{r bias NSCLC}
+sub_can = "NSCLC"
+
+rfFit.res <- readRDS(paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/",
+                            "rfFit.res-seed_36-ntree_6000-All-NSCLC.rds"))
+
+evalm.res <- evalm(rfFit.res, showplots = F)
+
+
+tmp_df <- cbind.data.frame(evalm.res$proc$data %>% 
+                             rownames_to_column(., var = 'pro_rank') %>% 
+                             mutate(pro_rank = as.numeric(pro_rank)) %>% 
+                             arrange(pro_rank) %>% 
+                             subset(select = c('R', 'obs')), 
+                           bICI_meta$k__Eukaryota %>% filter(Disease == sub_can))
+
+tmp_plot <- ggplot(data = tmp_df, aes(x = Cohort_name, y = R, col = Response))+
+  geom_boxplot(position = position_dodge(width = 1), 
+               outlier.colour = NA, width = 0.6) +
+  geom_point(position=position_jitterdodge()) +
+  theme_bw() +
+  scale_color_manual(values = respond_col) +
+  stat_compare_means(method = "wilcox", 
+                     # label = "p.signif", hide.ns = T)
+                     label = "p.format")
+
+tmp_plot1 <- ggplot(data = tmp_df %>% 
+                      filter(Response == 'R'), 
+                    aes(x = Cohort_name, y = R))+
+  geom_boxplot(position = position_dodge(width = 1), 
+               outlier.colour = NA, width = 0.6, 
+               col = "#015069") +
+  geom_jitter(col = "#015069") + 
+  theme_bw() +
+  stat_compare_means(method = "anova")
+
+tmp_plot2 <- ggplot(data = tmp_df %>% 
+                      filter(Response == 'NR'), 
+                    aes(x = Cohort_name, y = R))+
+  geom_boxplot(position = position_dodge(width = 1), 
+               outlier.colour = NA, width = 0.6, 
+               col = "#C71E1D") +
+  geom_jitter(col = "#C71E1D") + 
+  theme_bw() +
+  stat_compare_means(method = "anova")
+
+spm.plot <- ggscatter(tmp_df, x = "Age", y = "R",
+                add = "reg.line", color = "Response",
+                add.params = list(fill = "lightgray"),
+                conf.int = T)+
+  theme(legend.position = "none") +
+  stat_cor(method = "spearman",
+           aes(color = Response)) + 
+  scale_color_manual(values = respond_col)
+
+ggMarginal(spm.plot, type = "histogram", groupFill = TRUE)
+
+
+```
+
+## LOSO
+
+### LOSO calculation
+
+```{r LOSO cal}
+best_panel <- list(c("MM", "k__Eukaryota"),
+                   c("NSCLC", "All"))
+ntree_list <- c(seq(100, 900, 100), seq(1000, 10000, 1000))
+
+comp_group <- "Response"
+
+set.seed(123)
+
+
+for (sub_panel in best_panel) {
+  sub_can <- sub_panel[1]
+  kd <- sub_panel[2]
+  sub_meta <- bICI_meta[[kd]] %>%
+    filter(Disease == sub_can)
+  sub_mn_mt <- bICI_mn_list[[kd]] %>%
+    subset(select=rownames(sub_meta)) %>%
+    t() %>% as.data.frame() %>%
+    subset(select = my_imp_summary[[kd]][[sub_can]][["FullNames"]])
+  cohort_list <- unique(sub_meta$Cohort_name)
+  myData <- cbind.data.frame(group = sub_meta[[comp_group]],
+                             sub_mn_mt)
+  for (train_cohort in cohort_list) {
+    train_cohort <- cohort_list[7]
+    train_set <- myData[sub_meta$SampleID[sub_meta$Cohort_name == train_cohort], ]
+    rfFit <- train(group ~.,
+                     data = train_set,
+                     # tuneGrid = tuneGrid,
+                     # tuneGrid = tuneGrid1,
+                     tuneGrid = expand.grid(.mtry = 1),
+                     method = 'rf',
+                     preProcess="scale",
+                     trControl=control,
+                     ntree = 8000,
+                     metric = "ROC")
+      rfFit.evalm <- evalm(rfFit, showplots = F)
+      rfFit.evalm$roc
+    
+    for (ntree in ntree_list) {
+      set.seed(myseed)
+      tuneGrid1 <- expand.grid(.mtry = c(1:20))
+      rfFit <- train(group ~.,
+                     data = train_set,
+                     # tuneGrid = tuneGrid,
+                     # tuneGrid = tuneGrid1,
+                     tuneGrid = expand.grid(.mtry = 1),
+                     method = 'rf',
+                     preProcess="scale",
+                     trControl=control,
+                     ntree = 8000,
+                     metric = "ROC")
+      rfFit.evalm <- evalm(rfFit, showplots = F)
+      rfFit.evalm$roc
+      rfFit.res <- rfFit$results %>%
+        arrange(desc(ROC)) %>%
+        slice(1) %>%
+        subset(select = c(mtry, ROC)) 
+    }
+    for (valid_cohort in cohort_list) {
+      
+    }
+  }
+  
+  
+}
+
+
+
+```
+
+
+## Discard
+
+
+```{r discard2}
+
+rfFit_res_all2 <- list()
+i = 1
+for (myseed in 1:10) {
+  rfFit.df <- matrix(data = NA, nrow = 0, ncol = 6) %>%
+    as.data.frame() %>%
+    set_colnames(c('Kingdom', 'CancerType', 'seed', 'ntree', 'mtry', 'ROC'))
+  for (ntree in ntree_list) {
+    for (sub_panel in best_panel) {
+      kd <- sub_panel[2]
+      sub_can <- sub_panel[1]
+      rfFit <- readRDS(paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/07.Classifier/RF/rfFit_res/",
+                              "rfFit.res-seed_", myseed, "-ntree_", ntree, "-" , kd, "-", sub_can, '.rds'))
+      rfFit.res <- rfFit$results %>%
+        arrange(desc(ROC)) %>%
+        slice(1) %>%
+        subset(select = c(mtry, ROC)) 
+      rfFit.df <- rbind.data.frame(rfFit.df,
+        cbind.data.frame(Kingdom = kd,
+                         CancerType = sub_can,
+                         seed = myseed,
+                         ntree = ntree,
+                         rfFit.res))
+    }
+  }
+  rfFit_res_all2[[i]] <- rfFit.df
+  i <- i + 1
+  message("No. ", i, "-", myseed, "-ntree_", ntree, "-" , kd, "-", sub_can, " finished at ", date())
+}
+
+rfFit_res_list <-  append(rfFit_res_all2, rfFit_res_all)
+
+View(rfFit_res_list)
+
+```
+
+```{r discard}
+
+box_cand <- c("s__Nemania_serpens", "s__Klebsiella_quasipneumoniae", "s__Hymenoscyphus_fraxineus")
+
+
+ns_df <-  cbind(pICI_ds_list$k__Eukaryota$taxa_abund$Species %>% 
+  t() %>% as.data.frame() %>% 
+  select(contains("s__Nemania_serpens")), 
+  pICI_ds_list$k__Eukaryota$sample_table[, c("Period", "Cohort_name", "Response")])
+
+colnames(ns_df)[1] <- "s__Nemania_serpens"
+
+ns_df$Period <- factor(ifelse(ns_df$Period == "Before_ICI", "Before_ICI", "After_ICI"), levels = c("Before_ICI", "After_ICI"))
+
+
+ns_plot <- ggplot(data = ns_df, 
+                  mapping = aes(x = Period, 
+                                y = s__Nemania_serpens)) +
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter(aes(col = Period)) +
+  facet_wrap(. ~ Response, scales = 'free_y') + 
+  stat_compare_means(label = "p.signif", 
+                     comparisons = list(c("Before_ICI", "After_ICI"))) + 
+  theme_bw() +
+  scale_color_manual(values = c(Before_ICI = 'blueviolet', 
+                                After_ICI = 'darkorange')) + 
+  theme(legend.position = "bottom")
+  
+
+
+
+hf_df <-  cbind(pICI_ds_list$k__Eukaryota$taxa_abund$Species %>% 
+  t() %>% as.data.frame() %>% 
+  select(contains("s__Hymenoscyphus_fraxineus")), 
+  pICI_ds_list$k__Eukaryota$sample_table[, c("Period", "Cohort_name", "Response")])
+
+colnames(hf_df)[1] <- "s__Hymenoscyphus_fraxineus"
+
+hf_df$Period <- factor(ifelse(hf_df$Period == "Before_ICI", "Before_ICI", "After_ICI"), levels = c("Before_ICI", "After_ICI"))
+
+hf_df2 <- hf_df
+hf_df2$s__Hymenoscyphus_fraxineus <- hf_df2$s__Hymenoscyphus_fraxineus*1000
+
+hf_plot <- ggplot(data = hf_df2, 
+                  mapping = aes(x = Period, 
+                                y = s__Hymenoscyphus_fraxineus)) +
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter(aes(col = Period)) +
+  facet_wrap(. ~ Response, scales = 'free_y') + 
+  stat_compare_means(label = "p.signif", 
+                     comparisons = list(c("Before_ICI", "After_ICI"))) + 
+  theme_bw() +
+  scale_color_manual(values = c(Before_ICI = 'blueviolet', 
+                                After_ICI = 'darkorange')) + 
+  theme(legend.position = "bottom")
+  
+
+
+
+kp_df <-  cbind(pICI_ds_list$k__Bacteria$taxa_abund$Species %>% 
+  t() %>% as.data.frame() %>% 
+  select(contains("s__Klebsiella_quasipneumoniae")), 
+  pICI_ds_list$k__Bacteria$sample_table[, c("Period", "Cohort_name", "Response")])
+
+colnames(kp_df)[1] <- "s__Klebsiella_quasipneumoniae"
+
+kp_df$Period <- factor(ifelse(kp_df$Period == "Before_ICI", "Before_ICI", "After_ICI"), levels = c("Before_ICI", "After_ICI"))
+
+kp_df2 <- kp_df
+kp_df2$s__Klebsiella_quasipneumoniae <- kp_df2$s__Klebsiella_quasipneumoniae*100000
+
+kp_plot <- ggplot(data = kp_df2, 
+                  mapping = aes(x = Period, 
+                                y = atan(s__Klebsiella_quasipneumoniae))) +
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter(aes(col = Period)) +
+  facet_wrap(. ~ Response, scales = 'free_y') + 
+  stat_compare_means(label = "p.signif", 
+                     comparisons = list(c("Before_ICI", "After_ICI"))) + 
+  theme_bw() +
+  scale_color_manual(values = c(Before_ICI = 'blueviolet', 
+                                After_ICI = 'darkorange'))+ 
+  theme(legend.position = "bottom")
+
+if (save_or_not) {
+  ns_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "06.FeatureValidation/pICI"),
+                       Prefix = "Boxplot-N_serpens", Suffix = "pdf")
+  pdf(file = ns_pdf, width = 7, height = 8)
+  plot(ns_plot)
+  dev.off()
+  
+  kp_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "06.FeatureValidation/pICI"),
+                       Prefix = "Boxplot-K_quasipneumoniae", Suffix = "pdf")
+  pdf(file = kp_pdf, width = 7, height = 8)
+  plot(kp_plot)
+  dev.off()
+}
+
+```
+
+-->
+
+<!--
+
+
+## Calculate the MedianNormal
+
+```{r calculate the MedianNormal}
+
+mn_bac_ls <- MedianNormal(raw_df = bICI_ds_list$k__Bacteria$taxa_abund$Species, 
+                          meta_df = bICI_ds_list$k__Bacteria$sample_table, 
+                          min_add = 0.0001, rarefy_cutoff = 0.01)
+
+mn_bac_df <- mn_bac_ls$nm_df
+mn_bac_csv <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/MedianNormalization/"),
+                         Prefix = "Med_Normal-Bacteria", Suffix = "csv")
+write.csv(x = mn_bac_df, file = mn_bac_csv)
+```
+
+
+
+## Separate the data 
+
+### Separate pICI
+
+```{r Sparate pICI}
+calculate_or_not <- T
+
+# parameters
+sample_size <- c(all = 5000000,
+                 k__Bacteria = 5000000,
+                 k__Eukaryota = 5000,
+                 k__Archaea = 5000,
+                 k__Viruses = 5000)
+
+
+## pICI
+if (calculate_or_not) {
+  pICI_ds_list <- list()
+  pICI_filter_ds_list <- list()
+  pICI_rare_ds_list <- list()
+  
+  for (tax in names(sample_size)) {
+    pICI_ds_list[[tax]] <- pICI_ds$clone()
+    if (! tax == 'all') {
+      pICI_ds_list[[tax]]$tax_table %<>% subset(Kingdom == tax)
+      pICI_ds_list[[tax]]$tidy_dataset()
+    }
+    pICI_ds_list[[tax]]$cal_abund()
+    pICI_ds_list[[tax]]$tidy_dataset()
+    
+    pICI_rare_ds_list[[tax]] <- pICI_ds_list[[tax]]$clone()
+    pICI_rare_ds_list[[tax]]$rarefy_samples(sample.size = sample_size[tax])
+    pICI_rare_ds_list[[tax]]$cal_abund()
+    pICI_rare_ds_list[[tax]]$tidy_dataset()
+  
+  }
+  
+  pICI_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "pICI_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = pICI_ds_list, file = pICI_ds_rds)
+  
+  
+  for (tax in names(sample_size)) {
+    pICI_filter_ds_list[[tax]] <- pICI_ds_list[[tax]]$clone()
+    pICI_filter_ds_list[[tax]]$sample_table <- pICI_rare_ds_list[[tax]]$sample_table
+    pICI_filter_ds_list[[tax]]$tidy_dataset()
+  }
+  pICI_filter_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "pICI_filter_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = pICI_filter_ds_list, file = pICI_filter_ds_rds)
+  
+  pICI_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "pICI_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = pICI_ds_list, file = pICI_ds_rds)
+  
+  pICI_rare_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "pICI_rare_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = pICI_rare_ds_list, file = pICI_rare_ds_rds)
+
+}else{
+  pICI_rare_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-pICI_rare_ds_list_subKingdom-v1.0.rds"))
+  pICI_filter_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-pICI_filter_ds_list_subKingdom-v1.0.rds"))
+  pICI_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-pICI_ds_list_subKingdom-v1.0.rds"))
+}
+
+
+```
+
+### Separate iICI
+
+```{r Sparate iICI}
+## iICI
+
+if (calculate_or_not) {
+  iICI_ds_list <- list()
+  iICI_filter_ds_list <- list()
+  iICI_rare_ds_list <- list()
+  
+  for (tax in names(sample_size)) {
+    iICI_ds_list[[tax]] <- iICI_ds$clone()
+    if (! tax == 'all') {
+      iICI_ds_list[[tax]]$tax_table %<>% subset(Kingdom == tax)
+      iICI_ds_list[[tax]]$tidy_dataset()
+    }
+    iICI_ds_list[[tax]]$cal_abund()
+    iICI_ds_list[[tax]]$tidy_dataset()
+    
+    iICI_rare_ds_list[[tax]] <- iICI_ds_list[[tax]]$clone()
+    iICI_rare_ds_list[[tax]]$rarefy_samples(sample.size = sample_size[tax])
+    iICI_rare_ds_list[[tax]]$cal_abund()
+    iICI_rare_ds_list[[tax]]$tidy_dataset()
+  
+  }
+  
+  iICI_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "iICI_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = iICI_ds_list, file = iICI_ds_rds)
+  
+  
+  for (tax in names(sample_size)) {
+    iICI_filter_ds_list[[tax]] <- iICI_ds_list[[tax]]$clone()
+    iICI_filter_ds_list[[tax]]$sample_table <- iICI_rare_ds_list[[tax]]$sample_table
+    iICI_filter_ds_list[[tax]]$tidy_dataset()
+  }
+  iICI_filter_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "iICI_filter_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = iICI_filter_ds_list, file = iICI_filter_ds_rds)
+  
+  iICI_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "iICI_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = iICI_ds_list, file = iICI_ds_rds)
+  
+  iICI_rare_ds_rds <- FileCreate(DirPath = paste0(save_path_prefix, "01.PreProcessing/RDS"),
+                            Prefix = "iICI_rare_ds_list_subKingdom", 
+                            Suffix = "rds")
+  saveRDS(object = iICI_rare_ds_list, file = iICI_rare_ds_rds)
+
+}else{
+  iICI_rare_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-iICI_rare_ds_list_subKingdom-v1.0.rds"))
+  iICI_filter_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-iICI_filter_ds_list_subKingdom-v1.0.rds"))
+  iICI_ds_list <- readRDS(file = paste0(save_path_prefix, "01.PreProcessing/RDS/2022-12-15-iICI_ds_list_subKingdom-v1.0.rds"))
+}
+
+```
+
+-->
+
+
+<!--
+## Feature Selection 3
+
+[link](https://stats.stackexchange.com/questions/443234/random-forest-in-r-how-to-perform-feature-extraction-and-reach-the-best-accura)
+
+```{r feature selection 3}
+Wilcox_sel_function <- function(df, pvalue = 0.1, num = 2){
+  df1 <- df[rowSums(df < pvalue) >= num, ]
+  return(df1)
+}
+
+my_cand <- list()
+
+
+## cancer type for Eukaryota (p = 0.05; n = 2)
+my_cand$CancerType$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(my_cand$CancerType$k__Eukaryota %>% rownames())
+nrow(my_cand$CancerType$k__Eukaryota) # 39
+
+## cancer type for Bacteria (p = 0.05; n = 2)
+my_cand$CancerType$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(my_cand$CancerType$k__Bacteria %>% rownames())
+nrow(my_cand$CancerType$k__Bacteria) # 8
+
+
+## CohDis for Eukaryota (p = 0.1; n = 4)
+my_cand$CohDis$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 4)
+ShortName(my_cand$CohDis$k__Eukaryota %>% rownames())
+nrow(my_cand$CohDis$k__Eukaryota) # 28
+
+## CohDis for Bacteria (p = 0.1; n = 4)
+my_cand$CohDis$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 4)
+ShortName(my_cand$CohDis$k__Bacteria %>% rownames())
+nrow(my_cand$CohDis$k__Bacteria) # 14
+
+
+sel_cand_list <- list(
+  k__Bacteria = unique(c(my_cand$CancerType$k__Bacteria %>% 
+                           rownames(), 
+                         my_cand$CohDis$k__Bacteria %>% 
+                           rownames())),
+  k__Eukaryota = unique(c(my_cand$CancerType$k__Eukaryota %>% 
+                            rownames(), 
+                          my_cand$CohDis$k__Eukaryota %>% 
+                            rownames()))
+)
+
+lapply(sel_cand_list, length)
+
+seed_feature_train_list <- list()
+for (myseed in c(1:200)) {
+
+  comp_group <- "Response"
+  sub_group <- "Disease"
+
+  feature_train_list <- list()
+  for (kd in c("k__Bacteria", "k__Eukaryota")) {
+    sub_meta <- bICI_ds_list[[kd]]$sample_table # get the sub kingdom meta information
+    sub_mn_mt <- med_nor_list[[kd]]$sel_mn_df[sel_cand_list[[kd]], rownames(sub_meta)] # get the median normalization matrix
+    myData <- cbind.data.frame(group = sub_meta[[comp_group]], # combine the group information
+                               sub_group = sub_meta[[sub_group]]) %>%
+      cbind.data.frame(., sub_mn_mt%>% t())
+    
+    cancer_list <- unique(sub_meta[[sub_group]])
+    for (sub_can in cancer_list) {
+      sel_sub_mn_mt <- myData %>%
+        filter(sub_group == sub_can)  # select the cancer type (one of MM, NSCLC, RCC)
+      
+      if (nrow(sel_sub_mn_mt) <= 20){ # HCC only have 7 samples
+        message(kd, " in ", sub_can, " (", nrow(sel_sub_mn_mt), ") is less than 20, and filter it.")
+        next
+      }else{
+        message(kd, " in ", sub_can, " start at ", date())
+      }
+      
+      
+      sel_sub_mn_mt2 <- subset(sel_sub_mn_mt, # only select the otu features
+                               select = -c(group, sub_group)) %>%
+        as.matrix() 
+        
+      sel_sub_mn_mt2 %<>% .[, -which.min(apply(.,2,sd))] 
+        
+      sel_sub_mn_mt2 %<>% .[, apply(sel_sub_mn_mt2, 2, function(x) MyFreq(x)[1,2]) < nrow(sel_sub_mn_mt2)/2]
+      if (findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8) %>% length() == 0) {
+        ncl_df <- sel_sub_mn_mt2
+      }else{
+        ncl_df <- sel_sub_mn_mt2[, -findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8)] # remove the correlation factors
+      }
+      
+      if(ncol(ncl_df) == 0) next
+      # ncl_df2 <- cbind.data.frame(group = as.factor(sel_sub_mn_mt$group), ncl_df)
+      set.seed(myseed)
+      
+      # colnames(ncl_df2) %<>% gsub("^k__.+\\|", "", .) %>% gsub("\\.|\\[|\\]|\\-|\\:|\\/|\\(|\\)", "_", .)
+      
+      # rf <-randomForest(group~.,data=ncl_df2, importance=TRUE,ntree=500)
+      
+      # varImpPlot(rf, n.var = 20)
+      
+      my_size <- c(1:ncol(ncl_df))
+      # my_size <- c(1, seq(10, ncol(sel_sub_mn_mt2), by = 10))
+      
+      ## https://book.ncrnalab.org/teaching/part-iv.-machine-learning/2.machine-learning-with-r
+      rfFuncs$summary <- twoClassSummary 
+      rfectrl <- rfeControl(functions=rfFuncs,
+                            method="repeatedcv",
+                            repeats = 5,
+                            saveDetails = T)
+      rfe.results <- rfe(x = ncl_df, 
+                         y = as.factor(sel_sub_mn_mt$group), 
+                         sizes = my_size,
+                         rfeControl=rfectrl,
+                         metric = "ROC")
+      
+      # prepare training scheme
+      control <- trainControl(method="repeatedcv",
+                              repeats=5)
+      # train the model
+      sel_sub_mn_mt3 <- cbind.data.frame(
+        group = sel_sub_mn_mt$group %>% as.factor(),
+        sel_sub_mn_mt2)
+      model <- train(group ~ ., 
+                     data=sel_sub_mn_mt3, 
+                     method="rf", 
+                     preProcess="scale",
+                     trControl=control)
+      # estimate variable importance
+      importance <- varImp(model, scale=FALSE)
+      feature_train_list[[kd]][[sub_can]][["rfe.results"]] <- rfe.results
+      feature_train_list[[kd]][[sub_can]][["model"]] <- model
+      feature_train_list[[kd]][[sub_can]][["importance"]] <- importance
+    }
+  }
+  
+  for (sub_can in cancer_list) {
+    sub_meta <- bICI_ds_list$k__Bacteria$sample_table %>%
+      subset(., rownames(.) %in% 
+               rownames(bICI_ds_list$k__Eukaryota$sample_table))
+    
+    sel_sub_mn_mt <- cbind.data.frame(group = sub_meta[[comp_group]], # combine the group information
+                                      sub_group = sub_meta[[sub_group]]) %>%
+      cbind.data.frame(., med_nor_list$k__Bacteria$sel_mn_df[sel_cand_list$k__Bacteria, rownames(sub_meta)]%>% t()) %>%
+      cbind.data.frame(., med_nor_list$k__Eukaryota$sel_mn_df[sel_cand_list$k__Eukaryota, rownames(sub_meta)]%>% t()) %>%
+      filter(sub_group == sub_can)
+    
+    if (nrow(sel_sub_mn_mt) <= 20){ # HCC only have 7 samples
+      message("All in ", sub_can, " (", nrow(sel_sub_mn_mt), ") is less than 20, and filter it.")
+      next
+    }else{
+      message("All in ", sub_can, " start at ", date())
+    }
+    
+    sel_sub_mn_mt2 <- subset(sel_sub_mn_mt, # only select the otu features
+                             select = -c(group, sub_group)) %>%
+      as.matrix() 
+    class(sel_sub_mn_mt2) <- "numeric" # covnert the character to numeric
+    
+    sel_sub_mn_mt2 %<>% .[, -which.min(apply(.,2,sd))] 
+    
+    sel_sub_mn_mt2 %<>% .[, apply(sel_sub_mn_mt2, 2, function(x) MyFreq(x)[1,2]) < nrow(sel_sub_mn_mt2)/2]
+    
+    if (findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8) %>% length() == 0) {
+      ncl_df <- sel_sub_mn_mt2
+    }else{
+      ncl_df <- sel_sub_mn_mt2[, -findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8)] # remove the correlation factors
+    }
+    # ncl_df2 <- cbind.data.frame(group = as.factor(sel_sub_mn_mt$group), ncl_df) 
+    if(ncol(ncl_df) == 0) next
+    set.seed(myseed)
+    my_size <- c(1:ncol(ncl_df))
+    # my_size <- c(1, seq(10, ncol(sel_sub_mn_mt2), by = 10))
+    rfFuncs$summary <- twoClassSummary 
+    rfectrl <- rfeControl(functions=rfFuncs,
+                          method="repeatedcv",
+                          repeats = 5,
+                          saveDetails = T)
+    rfe.results <- rfe(x = ncl_df, 
+                       y = as.factor(sel_sub_mn_mt$group), 
+                       sizes = my_size,
+                       rfeControl=rfectrl,
+                       metric = "ROC")
+    
+    # prepare training scheme
+    control <- trainControl(method="repeatedcv",
+                            repeats=5)
+    # train the model
+    sel_sub_mn_mt3 <- cbind.data.frame(
+      group = sel_sub_mn_mt$group %>% as.factor(),
+      sel_sub_mn_mt2)
+    model <- train(group ~ ., 
+                   data=sel_sub_mn_mt3, 
+                   method="rf", 
+                   preProcess="scale",
+                   trControl=control)
+    # estimate variable importance
+    importance <- varImp(model, scale=FALSE)
+    feature_train_list[["All"]][[sub_can]][["rfe.results"]] <- rfe.results
+    feature_train_list[["All"]][[sub_can]][["model"]] <- model
+    feature_train_list[["All"]][[sub_can]][["importance"]] <- importance
+  }
+  message("seed = ", myseed, " has finished at ", date())
+  seed_feature_train_list[[myseed]] <- feature_train_list
+}
+#### save ####
+tmp_rds <- FileCreate(DirPath = paste0(save_path_prefix, "07.Classifier/RDS"),
+                      Prefix = "feature_train-seed_tes", Suffix = "rds")
+saveRDS(object = seed_feature_train_list, file = tmp_rds)
+
+seed_feature_top_df <- matrix(data = NA, nrow = 0, ncol = 8) %>%
+  as.data.frame() %>%
+  set_colnames(c("Seed","Variables", "ROC", "Sens", "Spec", "ROCSD", "SensSD", "SpecSD"))
+seed_feature_combine_df <- seed_feature_top_df
+
+for (num in 1:length(seed_feature_train_list)) {
+  seed_feature_combine_df <- rbind.data.frame(
+    seed_feature_combine_df, 
+    cbind.data.frame(
+      seed = num,
+      seed_feature_train_list[[num]]$All$MM$rfe.results$results %>% arrange(desc(ROC)))
+    )
+  seed_feature_top_df <- rbind.data.frame(
+    seed_feature_top_df,
+    cbind.data.frame(
+      seed = num,
+      seed_feature_train_list[[num]]$All$MM$rfe.results$results %>% arrange(desc(ROC)) %>% 
+        slice(1:1))
+    )
+}
+
+
+feature_train_list2 <- list()
+for (kd in names(feature_train_list)) {
+  for (sub_can in names(feature_train_list[[kd]])) {
+    feature_train_list2[[sub_can]][[kd]] <- feature_train_list[[kd]][[sub_can]]
+  }
+}
+
+
+
+tax_col2 <- tax_col
+tax_col2["All"] <- "seagreen"
+tax_col2["All"] <- "slategray"
+
+p_list <- list()
+for (sub_can in names(feature_train_list2)) {
+  p <- ggplot() + theme_bw()
+  for (kd in names(feature_train_list2[[sub_can]])) {
+    rfe_res_df <- feature_train_list2[[sub_can]][[kd]]$rfe.results$results %>%
+      mutate(Max = ifelse(.$ROC == max(.$ROC), 'max', 'ns'))
+    p <- p + 
+      geom_line(data = rfe_res_df, col = tax_col2[kd], 
+                linewidth = ifelse(kd == "All", 1, 0.5),
+                aes(x = Variables, y = ROC)) + 
+      geom_point(data = rfe_res_df,
+                 aes(x = Variables, y = ROC), col = tax_col2[kd])+
+      geom_point(data = rfe_res_df %>% filter(Max == "max"),
+                 aes(x = Variables, y = ROC), size = 2.5,
+                 shape=23, fill="darkred", color="blue")
+      
+  }
+  p_list[[sub_can]] <- p
+}
+
+
+saveRDS(object = p_list, file = "tmp-p_list.rds")
+saveRDS(object = feature_train_list2, file = "tmp-feature_train_list2.rds")
+saveRDS(object = feature_train_list, file = "tmp-feature_train_list.rds")
+
+
+
+
+
+```
+
+
+
+## Feature Selection2
+
+[link](https://stats.stackexchange.com/questions/443234/random-forest-in-r-how-to-perform-feature-extraction-and-reach-the-best-accura)
+
+```{r feature selection2}
+feature_list <- list()
+for (type in names(wil_res)) {
+  for (kd in names(wil_res[[type]])) {
+    tmp_list <- wil_res[[type]][[kd]]
+    feature_list[[kd]] <- c(tmp_list$sel_wil_sign_df %>%
+      subset(select = -c(All)) %>%
+      apply(., 1, function(x){
+        sum(x == "sign") >= ifelse(type == "CancerType", 2, 4)
+      }) %>%
+      names(.)[.], feature_list[[kd]])
+    if (length(feature_list[[kd]]) == 0) {
+      feature_list[[kd]] <- NULL
+    }
+  }
+}
+
+comp_group <- "Response"
+sub_group <- "Disease"
+
+feature_train_list <- list()
+# for (kd in names(med_nor_list)) {
+#   if (kd == "k__Viruses") next
+for (kd in c("k__Bacteria", "k__Eukaryota")) {
+  sub_meta <- bICI_ds_list[[kd]]$sample_table # get the sub kingdom meta information
+  sub_mn_mt <- med_nor_list[[kd]]$sel_mn_df[, rownames(sub_meta)] # get the median normalization matrix
+  myData <- cbind(group = sub_meta[[comp_group]], # combine the group information
+                  sub_group = sub_meta[[sub_group]]) %>%
+    cbind(., sub_mn_mt%>% t()) %>%
+    as.data.frame()
+  
+  cancer_list <- unique(sub_meta[[sub_group]])
+  for (sub_can in cancer_list) {
+    sel_sub_mn_mt <- myData %>%
+      filter(sub_group == sub_can)  # select the cancer type (one of MM, NSCLC, RCC)
+    
+    if (nrow(sel_sub_mn_mt) <= 20){ # HCC only have 7 samples
+      message(kd, " in ", sub_can, " (", nrow(sel_sub_mn_mt), ") is less than 20, and filter it.")
+      next
+    }else{
+      message(kd, " in ", sub_can, " start at ", date())
+    }
+    
+    
+    sel_sub_mn_mt2 <- subset(sel_sub_mn_mt, # only select the otu features
+                             select = -c(group, sub_group)) %>%
+      as.matrix() 
+      
+    class(sel_sub_mn_mt2) <- "numeric" # covnert the character to numeric
+    # sel_sub_mn_mt2 <- sel_sub_mn_mt2[, apply(sel_sub_mn_mt2, 2, 
+    #                                          function(x) ifelse(sd(x)==0, F, T))]
+    sel_sub_mn_mt2 %<>% .[, -which.min(apply(.,2,sd))] 
+      
+    sel_sub_mn_mt2 %<>% .[, apply(sel_sub_mn_mt2, 2, function(x) MyFreq(x)[1,2]) < nrow(sel_sub_mn_mt2)/2]
+    
+    ncl_df <- sel_sub_mn_mt2[, -findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8)] # remove the correlation factors
+    if(ncol(ncl_df) == 0) next
+    set.seed(123)
+    # my_size <- c(seq(5,45, by = 5), 
+    #              seq(50, ncol(sel_sub_mn_mt2), 
+    #                  length.out = 10) %>% 
+    #                round())
+    my_size <- c(1:50)
+    # my_size <- c(1, seq(10, ncol(sel_sub_mn_mt2), by = 10))
+    
+    ## https://book.ncrnalab.org/teaching/part-iv.-machine-learning/2.machine-learning-with-r
+    rfFuncs$summary <- twoClassSummary 
+    rfectrl <- rfeControl(functions=rfFuncs,
+                          method="repeatedcv",
+                          repeats = 5,
+                          saveDetails = T)
+    rfe.results <- rfe(x = ncl_df, 
+                       y = as.factor(sel_sub_mn_mt$group), 
+                       sizes = my_size,
+                       rfeControl=rfectrl,
+                       metric = "ROC")
+    
+    # prepare training scheme
+    control <- trainControl(method="repeatedcv",
+                            repeats=5)
+    # train the model
+    sel_sub_mn_mt3 <- cbind.data.frame(
+      group = sel_sub_mn_mt$group %>% as.factor(),
+      sel_sub_mn_mt2)
+    model <- train(group ~ ., 
+                   data=sel_sub_mn_mt3, 
+                   method="rf", 
+                   preProcess="scale",
+                   trControl=control)
+    # estimate variable importance
+    importance <- varImp(model, scale=FALSE)
+    feature_train_list[[kd]][[sub_can]][["rfe.results"]] <- rfe.results
+    feature_train_list[[kd]][[sub_can]][["model"]] <- model
+    feature_train_list[[kd]][[sub_can]][["importance"]] <- importance
+  }
+}
+
+for (sub_can in cancer_list) {
+  sub_meta <- bICI_ds_list$k__Bacteria$sample_table %>%
+    subset(., rownames(.) %in% 
+             rownames(bICI_ds_list$k__Eukaryota$sample_table))
+  
+  sel_sub_mn_mt <- cbind(group = sub_meta[[comp_group]], # combine the group information
+                         sub_group = sub_meta[[sub_group]]) %>%
+    cbind(., med_nor_list$k__Bacteria$sel_mn_df[, rownames(sub_meta)]%>% t()) %>%
+    cbind(., med_nor_list$k__Eukaryota$sel_mn_df[, rownames(sub_meta)]%>% t()) %>%
+    as.data.frame() %>%
+    filter(sub_group == sub_can)
+  
+  if (nrow(sel_sub_mn_mt) <= 20){ # HCC only have 7 samples
+    message(kd, " in ", sub_can, " (", nrow(sel_sub_mn_mt), ") is less than 20, and filter it.")
+    next
+  }else{
+    message(kd, " in ", sub_can, " start at ", date())
+  }
+  
+  sel_sub_mn_mt2 <- subset(sel_sub_mn_mt, # only select the otu features
+                           select = -c(group, sub_group)) %>%
+    as.matrix() 
+  class(sel_sub_mn_mt2) <- "numeric" # covnert the character to numeric
+  
+  sel_sub_mn_mt2 %<>% .[, -which.min(apply(.,2,sd))] 
+  
+  sel_sub_mn_mt2 %<>% .[, apply(sel_sub_mn_mt2, 2, function(x) MyFreq(x)[1,2]) < nrow(sel_sub_mn_mt2)/2]
+  
+  ncl_df <- sel_sub_mn_mt2[, -findCorrelation(cor(sel_sub_mn_mt2), cutoff = 0.8)] # remove the correlation factors
+  
+  if(ncol(ncl_df) == 0) next
+  set.seed(123)
+  my_size <- c(1:50)
+  # my_size <- c(1, seq(10, ncol(sel_sub_mn_mt2), by = 10))
+  rfFuncs$summary <- twoClassSummary 
+  rfectrl <- rfeControl(functions=rfFuncs,
+                        method="repeatedcv",
+                        repeats = 5,
+                        saveDetails = T)
+  rfe.results <- rfe(x = ncl_df, 
+                     y = as.factor(sel_sub_mn_mt$group), 
+                     sizes = my_size,
+                     rfeControl=rfectrl,
+                     metric = "ROC")
+  
+  # prepare training scheme
+  control <- trainControl(method="repeatedcv",
+                          repeats=5)
+  # train the model
+  sel_sub_mn_mt3 <- cbind.data.frame(
+    group = sel_sub_mn_mt$group %>% as.factor(),
+    sel_sub_mn_mt2)
+  model <- train(group ~ ., 
+                 data=sel_sub_mn_mt3, 
+                 method="rf", 
+                 preProcess="scale",
+                 trControl=control)
+  # estimate variable importance
+  importance <- varImp(model, scale=FALSE)
+  feature_train_list[["All"]][[sub_can]][["rfe.results"]] <- rfe.results
+  feature_train_list[["All"]][[sub_can]][["model"]] <- model
+  feature_train_list[["All"]][[sub_can]][["importance"]] <- importance
+}
+
+
+
+
+
+
+
+feature_train_list2 <- list()
+for (kd in names(feature_train_list)) {
+  for (sub_can in names(feature_train_list[[kd]])) {
+    feature_train_list2[[sub_can]][[kd]] <- feature_train_list[[kd]][[sub_can]]
+  }
+}
+
+
+
+tax_col2 <- tax_col
+tax_col2["All"] <- "seagreen"
+tax_col2["All"] <- "slategray"
+
+p_list <- list()
+for (sub_can in names(feature_train_list2)) {
+  p <- ggplot() + theme_bw()
+  for (kd in names(feature_train_list2[[sub_can]])) {
+    rfe_res_df <- feature_train_list2[[sub_can]][[kd]]$rfe.results$results %>%
+      mutate(Max = ifelse(.$ROC == max(.$ROC), 'max', 'ns'))
+    p <- p + 
+      geom_line(data = rfe_res_df, col = tax_col2[kd], 
+                linewidth = ifelse(kd == "All", 1, 0.5),
+                aes(x = Variables, y = ROC)) + 
+      geom_point(data = rfe_res_df,
+                 aes(x = Variables, y = ROC), col = tax_col2[kd])+
+      geom_point(data = rfe_res_df %>% filter(Max == "max"),
+                 aes(x = Variables, y = ROC), size = 2.5,
+                 shape=23, fill="darkred", color="blue")
+      
+  }
+  p_list[[sub_can]] <- p
+}
+
+
+p_list <- readRDS("tmp-p_list.rds")
+feature_train_list2 <- readRDS("tmp-feature_train_list2.rds")
+feature_train_list <- readRDS("tmp-feature_train_list.rds")
+
+# saveRDS(object = p_list, file = "tmp-p_list.rds")
+# saveRDS(object = feature_train_list2, file = "tmp-feature_train_list2.rds")
+# saveRDS(object = feature_train_list, file = "tmp-feature_train_list.rds")
+# 
+
+
+# p <- ggplot(tmp_res$results, aes(x = Variables, y = ROC))+
+#   geom_line() +
+#   geom_point() +
+#   theme_bw()
+
+
+#### rfe ###
+# Set RFE control
+# By using rfFuncs, caret will use a random forest to evaluate the usefulness of a feature.
+# ctrl <- rfeControl(functions = rfFuncs,
+#                    method = "repeatedcv",
+#                    repeats = 5,
+#                    saveDetails = T)
+# 
+# # Set a sequence of feature-space sizes to search over:
+# # note, this will fit hundreds of forests (not trees), so it may take a while.
+# sizes = seq(sqrt(ncol(ncl_df))*.5, 
+#             ncol(ncl_df), by = 5)    
+# sizes = c(seq(5,9), seq(10,50,5))
+# 
+# # Use caret's rfe function to fit RF models to these different feature spaces
+# rfeResults = rfe(x = ncl_df, 
+#                  y = as.factor(sel_sub_mn_mt$group),
+#                  sizes = sizes,
+#                  rfeControl = ctrl)
+# # sizes2 <- seq(30,51,5)
+# # rfeResults2 = rfe(x = ncl_df, 
+# #                  y = as.factor(sel_sub_mn_mt$group),
+# #                  sizes = sizes2,
+# #                  rfeControl = ctrl)
+
+
+
+
+
+# for (kd in names(med_nor_list)) {
+#   sub_meta <- bICI_ds_list[[kd]]$sample_table # get the sub kingdom meta information
+#   sub_mn_mt <- med_nor_list[[kd]]$sel_mn_df[, rownames(sub_meta)] # get the median normalization matrix
+#   myData <- cbind(group = sub_meta[[comp_group]], # combine the group information
+#                   sub_mn_mt%>% t()) %>%
+#     as.data.frame()
+#   imp_scr <- 50 # set the important score
+#   set.seed(123) # in order to obtain the consistent results
+#   
+#   imp_df <- matrix(data = NA, nrow = 0 , ncol = nrow(sub_mn_mt))
+#   cancer_list <- unique(sub_meta[[sub_group]])
+#   
+#   for (sub_can in cancer_list) {
+#     if (sub_can == "HCC") next # HCC only have 7 samples
+#     message(kd, " with ", sub_can, " start at ", date())
+#     
+#     # start the parallel
+#     cores = detectCores() # not to overload your computer
+#     cl <- makeCluster(cores[1]-1)
+#     registerDoParallel(cl)
+#     
+#     # This function is used to parallelize loops in R, 
+#     # which can be useful when working with large datasets or 
+#     # running computationally intensive processes.
+#     Importance_Table <- foreach (t=1:10, .combine=rbind) %dopar% {
+#       seed <- sample.int(10)
+#       set.seed(seed)
+#       seeds <- vector(mode = "list", length = 50)
+#       for(i in 1:50){
+#         seeds[[i]] <- sample.int(1000, 12)
+#       }
+#       
+#       ## For the last model:
+#       seeds[[50]] <- sample.int(1000, 1)
+#       
+#       myData$Response <- as.factor(myData$Response)
+#       
+#       training <- myData[rownames(tmp_meta)[tmp_meta$Disease == c],]
+#       testing <- myData[rownames(tmp_meta)[tmp_meta$Disease != c], ] 
+#       
+#       train_control <- caret::trainControl(method="cv", number=10, verboseIter = TRUE, seeds = seeds) 
+#       
+#       model <- caret::train(training[,2:ncol(training)],
+#                             as.factor(training[,1]), 
+#                             method = "rf", type="classification",
+#                             metric= "Accuracy", maximize= TRUE, 
+#                             trControl = train_control, importance = TRUE) 
+#       
+#       
+#       Adding_columns <- NULL
+#       varImp2 <- caret::varImp(model, scale = TRUE)
+#       Adding_columns <- t(varImp2$importance)
+#       rownames(Adding_columns) <- paste0(rownames(Adding_columns),".", t)
+#       tmp <- Adding_columns[1, ,drop = F] 
+#     }
+#   }
+#   
+#   
+#   
+# }
+
+
+
+
+```
+
+
+<!--
+## feature importance score
+```{r previous}
+for (tax in names(wil_res)) {
+  tmp_meta <- bICI_ds_list[[tax]]$sample_table
+  tmp_feat <-  feature_list[[tax]]
+  tmp_mn_df <- med_nor_list[[tax]][, tmp_feat]
+  
+  myData <- cbind(Response = tmp_meta$Response, tmp_mn_df)
+  
+  important_score <- 50
+  set.seed(123)7
+  
+  Importance_list <- matrix(data = NA, nrow = 0, ncol = length(tmp_feat))
+  cancer_list <- unique(tmp_meta$Disease)
+  for (c in cancer_list) {
+    if (c == "HCC") {
+      next
+    }
+    message(tax, " with ", c, " start at ", date())
+    # parallel
+    cores=detectCores()
+    cl <- makeCluster(cores[1]-1) # not to overload your computer
+    registerDoParallel(cl)
+    Importance_Table <- foreach (t=1:10, .combine=rbind) %dopar% {
+      seed <- sample.int(10)
+      set.seed(seed)
+      seeds <- vector(mode = "list", length = 50)
+      for(i in 1:50){
+        seeds[[i]] <- sample.int(1000, 12)
+      }
+      
+      ## For the last model:
+      seeds[[50]] <- sample.int(1000, 1)
+      
+      myData$Response <- as.factor(myData$Response)
+      
+      training <- myData[rownames(tmp_meta)[tmp_meta$Disease == c],]
+      testing <- myData[rownames(tmp_meta)[tmp_meta$Disease != c], ] 
+
+      train_control <- caret::trainControl(method="cv", number=10, verboseIter = TRUE, seeds = seeds) 
+
+      model <- caret::train(training[,2:ncol(training)],
+                            as.factor(training[,1]), 
+                            method = "rf", type="classification",
+                            metric= "Accuracy", maximize= TRUE, 
+                            trControl = train_control, importance = TRUE) 
+
+
+      Adding_columns <- NULL
+      varImp2 <- caret::varImp(model, scale = TRUE)
+      Adding_columns <- t(varImp2$importance)
+      rownames(Adding_columns) <- paste0(rownames(Adding_columns),".", t)
+      tmp <- Adding_columns[1, ,drop = F] 
+    }
+    stopCluster(cl) #stop cluster  
+    tmp_pw <- getwd()
+    tar_pw <- paste0(save_path_prefix,'07.Classifier/RF/FeatureSel_Important/CancerType/', tax)
+    if(! dir.exists(tar_pw)) dir.create(tar_pw, recursive =T)
+    setwd(paste0(save_path_prefix,'07.Classifier/RF/FeatureSel_Important/CancerType/', tax))
+    Importance_Table_csv <- FileCreate(DirPath = "./", 
+                                       Prefix = paste0('Importance_Table_', c), Suffix = 'csv')
+    
+    Importance_Table_Mean <- t(apply(Importance_Table, MARGIN = 2, function(x) mean(x, na.rm=TRUE)))
+    rownames(Importance_Table_Mean) <- paste0(c, "_Mean")
+    Importance_list <- rbind(Importance_list, Importance_Table_Mean)
+    Importance_Table_2 <- as.data.frame(Importance_Table)
+    Importance_Table_2 <- rbind(Mean=Importance_Table_Mean, Importance_Table_2)
+    write.csv(x = Importance_Table_2, file = Importance_Table_csv)
+    setwd(tmp_pw)
+    Importance_Table_Filter <- as.data.frame(Importance_Table_Mean)
+    Importance_Table_Filter2 <- Importance_Table_Filter[,Importance_Table_Filter< important_score]
+    Importance_Table_Filter3 <- colnames(Importance_Table_Filter2) 
+    Excluding_Channels <- names(myData) %in% Importance_Table_Filter3
+    myData_filter <- myData[!Excluding_Channels]
+    tmp_pw <- getwd()
+    tar_pw <- paste0(save_path_prefix,'07.Classifier/RF/FeatureSel_Important/CancerType/', tax)
+    if(! dir.exists(tar_pw)) dir.create(tar_pw, recursive =T)
+    setwd(tar_pw)
+    Importance_filter_csv <- FileCreate(DirPath = "./", 
+                                       Prefix = paste0('Importance_feature_', c, "_", important_score), Suffix = 'csv')
+    write.csv(x = Importance_Table_Filter[,Importance_Table_Filter>= important_score], file = Importance_filter_csv)
+    setwd(tmp_pw)
+  }
+  
+   Importance_df2 <- as.data.frame(t(Importance_list))
+   for (c in cancer_list) {
+     if (c == "HCC") {
+       next
+     }
+     Importance_df2[[paste0(c, "_Rank")]] <- rank(-Importance_df2[[paste0(c, "_Mean")]])
+   }
+   rank_list <- grep('_Rank', colnames(Importance_df2))
+   Importance_df2$Rank3 <- apply(Importance_df2[, rank_list] , 1,
+                                 function(x){ifelse(any(x <= 3), 'Sel', "Ign")})
+   Importance_df2$Rank5 <- apply(Importance_df2[, rank_list] , 1, 
+                                 function(x){ifelse(any(x <= 5), 'Sel', "Ign")})
+   Importance_df2$Rank10 <- apply(Importance_df2[, rank_list] , 1, 
+                                  function(x){ifelse(any(x <= 10), 'Sel', "Ign")})
+   tmp_pw <- getwd()
+   tar_pw <- paste0(save_path_prefix,'07.Classifier/RF/FeatureSel_Important/CancerType/', tax)
+   if(! dir.exists(tar_pw)) dir.create(tar_pw, recursive =T)
+   setwd(tar_pw)
+   Importance_df2_csv <-  FileCreate(DirPath = './', 
+                                     Prefix = 'Combine_importantScore_rank_all', Suffix = 'csv')
+   write.csv(Importance_df2, Importance_df2_csv)
+   setwd(tmp_pw)
+  
+}
+
+
+```
+
+-->
+

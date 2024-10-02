@@ -1,0 +1,1664 @@
+---
+title: "revision"
+author: "Ifan LIN"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Parameters
+
+```{r parameters}
+require(tidyverse)
+require(coin)
+require(magrittr)
+require(clusterProfiler)
+
+
+
+respond_col <- c(NR = '#C71E1D', R = '#015069')
+
+tax_col <- c(k__Bacteria = "#f9b4ab", k__Eukaryota = "#FDEBD3",
+             k__Archaea = "#7aa9d1", k__Viruses = "#96b6ad")
+
+cohort_col <- c(`2017_Frankel` = "#EE6B3B", `2018_Gopalakrishnan` = "#A02C5D",
+                `2018_Maston` = "#EC0F47", `2018_Routy` = "#700460",
+                `2019_Peters` = "#022C7A", `2019_Zheng` = "#1A1333",
+                `2021_Baruch` = "#FBBF54", `2021_Spencer` = "#045459",
+                `2021_Davar` = "#ABD96D", `2022_McCulloch` = "#15C286",
+                `2022_Lee` = "#262949", `2022_Derosa` = "#087353")
+
+cancer_col <- c(MM = "#7f58af", HCC = '#64C5EB', 
+                NSCLC = '#E84D8A', RCC = '#FEB326')
+save_path_prefix <- "../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/"
+```
+
+## Confounder Factor
+
+### Confounder factor import
+
+```{r CF import}
+bICI_ds <- readRDS(paste0(save_path_prefix, "01.PreProcessing/RDS/2022-10-19-bICI_rare_ds_list_subKingdom-v1.0.rds"))
+```
+
+
+### Confounder (Bacteria)
+
+```{r bacteria}
+bac_meta <- bICI_ds$k__Bacteria$sample_table
+
+
+bac_meta <- bac_meta %>% 
+  # age
+  mutate(age_factor = factor(
+    cut(.$Age, breaks = quantile(.$Age, na.rm = T), labels = c(1,2,3,4)))) %>%
+  # cohort
+  mutate(cohort_factor = factor(
+    .$Cohort_name)) %>% 
+  # antibiotics
+  mutate(antibiotics_factor = factor(.$Antibiotics)) %>% 
+  # gender
+  mutate(gender_factor = factor(.$Gender)) %>% 
+  # cancer type
+  mutate(cancer_factor = factor(.$Disease)) %>% 
+  # ICI
+  mutate(ICI_factor = factor(.$ICI)) %>% 
+  # PFS
+  mutate(PFS_factor = factor(ifelse(
+    is.na(.$PFS), NA,
+    ifelse(
+      .$PFS > 365*5, 1, 2
+    )))) %>% 
+  # Continent
+  mutate(geographic_factor = factor(.$Continent))
+  
+
+bac_rel <- bICI_ds$k__Bacteria$taxa_abund$Species
+
+# bac_rel_fil <- bac_rel[rowMeans(bac_rel) >= 1e-5,]
+bac_rel_fil <- bac_rel[rowMeans(bac_rel) >= 1e-4,]
+
+ss.disease <- apply(bac_rel_fil, 1, FUN=function(x, label){
+  rank.x <- rank(x)/length(x)
+  ss.tot <- sum((rank.x - mean(rank.x))^2)/length(rank.x)
+  ss.o.i <- sum(vapply(unique(label), function(l){
+    sum((rank.x[label==l] - mean(rank.x[label==l]))^2)
+    }, FUN.VALUE = double(1)))/length(rank.x)
+  return(1-ss.o.i/ss.tot)
+}, label=bac_meta %>% pull(Response))
+
+
+
+wil_bac_sp_cohort <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds/2023-03-15-Wilcox-MN_Idx-",
+                                         "Bacteria-CohDis", "-v1.0.rds"))
+wil_bac_sp_mn <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN/rds/2023-03-15-Wilcox-MN_Idx-",
+                                         "Bacteria", "-bICI-v1.0.rds"))
+
+bac.t.mean <- apply(bac_rel_fil, 1, mean, trim=0.1)
+
+
+bac.feat.sign <- rownames(bac_rel_fil) %in% c(rownames(wil_bac_sp_cohort$sel_wil_df),rownames(wil_bac_sp_mn$sel_wil_df))
+
+bac.df.plot.all <- tibble(
+  species=rownames(bac_rel_fil),
+  disease=ss.disease,
+  t.mean=bac.t.mean,
+  meta.significance=bac.feat.sign)
+
+# df.list <- list()
+for (meta.var in c('age_factor', 'cohort_factor', 
+                   'antibiotics_factor','gender_factor', 
+                   'cancer_factor', 'ICI_factor', 
+                   'PFS_factor', "geographic_factor")) {
+  
+
+  cat('###############################\n', meta.var, '\n')
+  meta.c <- bac_meta %>%
+    filter(!is.na(eval(parse(text=meta.var))))
+
+  cat('After filtering, the distribution of variables is:\n')
+  print(table(meta.c$Response, meta.c %>% pull(meta.var)))
+  feat.red <- bac_rel_fil[,meta.c$SampleID]
+
+  cat('Calculating variance explained by meta-variable...\n')
+  ss.var <- apply(feat.red, 1, FUN=function(x, label){
+    rank.x <- rank(x)/length(x)
+    ss.tot <- sum((rank.x - mean(rank.x))^2)/length(rank.x)
+    ss.o.i <- sum(vapply(unique(label), function(l){
+      sum((rank.x[label==l] - mean(rank.x[label==l]))^2)
+    }, FUN.VALUE = double(1)))/length(rank.x)
+    return(1 - ss.o.i/ss.tot)
+  }, label=meta.c %>% pull(meta.var))
+  bac.df.plot.all[[meta.var]] <- ss.var
+
+  cat('Calculating association with the meta-variable...\n')
+  if (meta.c %>% pull(meta.var) %>% unique %>% length > 2){
+    meta.significance <- apply(feat.red, 1, FUN=function(x, var){
+      kruskal.test(x~as.factor(var))$p.value
+    }, var=meta.c %>% pull(meta.var))
+  } else {
+    meta.significance <- apply(feat.red, 1, FUN=function(x, var){
+      wilcox.test(x~as.factor(var))$p.value
+    }, var=meta.c %>% pull(meta.var))
+  }
+  meta.significance <- p.adjust(meta.significance, method='fdr')
+  bac.df.plot.all[[paste0(meta.var, '.significance')]] <- meta.significance
+  cat('\n')
+}
+
+bac.df.plot.all <- bac.df.plot.all %>%
+  gather(key=type, value=meta, -species, -disease,
+         -t.mean,  -meta.significance) %>%
+  filter(!str_detect(type, '.significance')) %>%
+  filter(complete.cases(.)) 
+
+
+bac.g.all <- bac.df.plot.all %>%
+  mutate(facet=case_when(type=='age_factor' ~ 'Age',
+                         type=='antibiotics_factor' ~ 'Antibiotic',
+                         type=='gender_factor' ~ 'Gender',
+                         type=='cancer_factor' ~ 'Cancer type',
+                         type=='cohort_factor' ~ 'Cohort',
+                         type == 'ICI_factor' ~ "ICI method",
+                         type == 'PFS_factor' ~ "5 year survival",
+                         type == 'geographic_factor' ~ "Geographic",
+                         TRUE ~ type)) %>%
+  mutate(facet = factor(facet, levels = c('Cohort', 'Cancer type', 'Geographic', 
+                                          "Age",  "Antibiotic", "5 year survival",
+                                          "Gender", "ICI method"))) %>% 
+  ggplot(aes(x=disease, y=meta, size=t.mean+1e-08, col=meta.significance)) +
+    geom_point(shape=19) +
+    xlab('Variance explained by Response status') +
+    ylab('Variance explained by metadata variable') +
+    theme_bw() +
+    facet_wrap(~facet, ncol=3) +
+    theme(strip.background = element_blank(),
+          panel.grid.minor = element_blank()) +
+    scale_x_continuous(breaks = seq(from=0, to=0.05, by=0.01)) +
+    scale_y_continuous(breaks=seq(from=0, to=0.5, by=0.1)) +
+    # scale_colour_manual(values = alpha(c('black', '#CC071E'),
+    #                                    alpha=c(0.1, .75)),
+    scale_colour_manual(values = alpha(c('black', 'black'),
+                                       alpha=c(0.1, 0.1)),
+                        name=paste0('Significance\n(', alpha.meta, ' FDR)')) +
+    scale_size_area(name='Trimmed mean\nabundance',
+               breaks=c(1e-05, 1e-03, 1e-02)) +
+    guides( size = "legend", colour='legend')
+
+bac.g.all + theme(text = element_blank(),  legend.position = "none")
+
+bac_confounder_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "/10.Revision/Confounder"),
+                            Prefix = "Bacteria-confounder-scatter",
+                            Suffix = "pdf")
+
+pdf(bac_confounder_pdf, width = 7, height = 7)
+plot(bac.g.all)
+plot(bac.g.all + theme(legend.position = "none"))
+plot(bac.g.all + theme(text = element_blank(),  legend.position = "none"))
+dev.off()
+
+bac_confounder_pdf2 <- FileCreate(DirPath = paste0(save_path_prefix, "/10.Revision/Confounder"),
+                            Prefix = "Bacteria-confounder-scatter-noLegend",
+                            Suffix = "pdf")
+pdf(bac_confounder_pdf2, width = 6, height = 7)
+plot(bac.g.all + theme(legend.position = "none"))
+dev.off()
+
+
+```
+
+## MM analysis
+
+### Wilcoxon test (MM)
+
+```{r wilcox CohDis}
+# import data 
+
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, 
+             "01.PreProcessing/MN_Idx/", 
+             "MN_res-Bacteria-cover_10p-cutoff_1e-4-minValue_1e-6/"))
+bac_mn_res2 <- readRDS(file = "2023-03-15-Bacteria_mn_res-v1.0.rds")
+setwd(tmp_path)
+
+setwd(paste0(save_path_prefix, 
+             "01.PreProcessing/MN_Idx/", 
+             "MN_res-Eukaryota-cover_10p-cutoff_1e-4-minValue_1e-6/"))
+euk_mn_res2 <- readRDS(file = "2023-03-15-Eukaryota_mn_res-v1.0.rds")
+setwd(tmp_path)
+
+setwd(paste0(save_path_prefix, 
+             "01.PreProcessing/MN_Idx/", 
+             "MN_res-Archaea-cover_10p-cutoff_1e-4-minValue_1e-6/"))
+arc_mn_res2 <- readRDS("2023-03-15-Archaea_mn_res-v1.0.rds")
+setwd(tmp_path)
+
+setwd(paste0(save_path_prefix, 
+             "01.PreProcessing/MN_Idx/", 
+             "MN_res-Viruses-cover_10p-cutoff_1e-4-minValue_1e-6/"))
+vir_mn_res2 <- readRDS("2023-03-15-Viruses_mn_res-v1.0.rds")
+setwd(tmp_path)
+
+
+mm_wil_list <- list()
+
+# Temp meta info (Bacteria)
+tmp_meta <- bICI_ds_list$k__Bacteria$sample_table %>% 
+  filter(Disease == "MM")
+
+# select the MM samples
+tmp_otu <- bICI_ds_list$k__Bacteria$taxa_abund$Species[colnames(bac_mn_res2$nm_df),rownames(tmp_meta)]
+
+# Calculate the Wilcox between Response and sub-group in Continent
+mm_wil_list$k__Bacteria <- Wil_Matrix(
+  sub_otu = tmp_otu,
+  p_cutoff = 0.05,
+  rarefy_or_not = F,
+  sub_meta = tmp_meta,
+  comparison_rank = c("R", "NR"),
+  sub_catolog = "Continent",
+  sub_comparison = "Response")
+View(mm_wil_list$k__Bacteria$wil_df %>% rownames_to_column())
+
+
+
+# Temp meta info (Eukaryota)
+tmp_meta <- bICI_ds_list$k__Eukaryota$sample_table %>% 
+  filter(Disease == "MM")
+
+# select the MM samples
+tmp_otu <- bICI_ds_list$k__Eukaryota$taxa_abund$Species[colnames(euk_mn_res2$nm_df),rownames(tmp_meta)]
+
+
+# Calculate the Wilcox between Response and sub-group in Country
+mm_wil_list$k__Eukaryota <-
+  Wil_Matrix(
+    sub_otu = tmp_otu,
+    p_cutoff = 0.05,
+    rarefy_or_not = F,
+    sub_meta = tmp_meta,
+    comparison_rank = c("R", "NR"),
+    # sub_catolog = "Country",
+    sub_catolog = "Continent",
+    sub_comparison = "Response"
+  )
+View(mm_wil_list$k__Eukaryota$wil_df %>% rownames_to_column())
+
+# Temp meta info (Archaea)
+tmp_meta <- bICI_ds_list$k__Archaea$sample_table %>% 
+  filter(Disease == "MM")
+
+# select the MM samples
+tmp_otu <- bICI_ds_list$k__Archaea$taxa_abund$Species[colnames(arc_mn_res2$nm_df),rownames(tmp_meta)]
+
+# Calculate the Wilcox between Response and sub-group in Country
+mm_wil_list$k__Archaea <-
+  Wil_Matrix(
+    sub_otu = tmp_otu,
+    p_cutoff = 0.05,
+    rarefy_or_not = F,
+    sub_meta = tmp_meta,
+    comparison_rank = c("R", "NR"),
+    # sub_catolog = "Country",
+    sub_catolog = "Continent",
+    sub_comparison = "Response"
+  )
+
+
+
+# Temp meta info (Viruses)
+tmp_meta <- bICI_ds_list$k__Viruses$sample_table %>% 
+  filter(Disease == "MM")
+
+# select the MM samples
+tmp_otu <- bICI_ds_list$k__Viruses$taxa_abund$Species[colnames(vir_mn_res2$nm_df),rownames(tmp_meta)]
+
+# Calculate the Wilcox between Response and sub-group in Country
+mm_wil_list$k__Viruses <-
+  Wil_Matrix(
+    sub_otu = tmp_otu,
+    p_cutoff = 0.05,
+    rarefy_or_not = F,
+    sub_meta = tmp_meta,
+    comparison_rank = c("R", "NR"),
+    # sub_catolog = "Country",
+    sub_catolog = "Continent",
+    sub_comparison = "Response"
+  )
+
+mm_wil_Bacteria_csv <-
+  FileCreate(
+    DirPath = paste0(save_path_prefix, "/10.Revision/MM_Geographic"),
+    Prefix = "Bacteria-MM-ccontinent",
+    Suffix = "csv"
+  )
+write.csv(x = mm_wil_list$k__Bacteria$sel_wil_df, file = mm_wil_Bacteria_csv)
+
+
+mm_wil_Eukaryota_csv <-
+  FileCreate(
+    DirPath = paste0(save_path_prefix, "/10.Revision/MM_Geographic"),
+    Prefix = "Eukaryota-MM-ccontinent",
+    Suffix = "csv"
+  )
+write.csv(x = mm_wil_list$k__Eukaryota$sel_wil_df, file = mm_wil_Eukaryota_csv)
+
+
+mm_wil_Archaea_csv <-
+  FileCreate(
+    DirPath = paste0(save_path_prefix, "/10.Revision/MM_Geographic"),
+    Prefix = "Archaea-MM-ccontinent",
+    Suffix = "csv"
+  )
+write.csv(x = mm_wil_list$k__Archaea$sel_wil_df, file = mm_wil_Archaea_csv)
+
+
+mm_wil_Viruses_csv <-
+  FileCreate(
+    DirPath = paste0(save_path_prefix, "/10.Revision/MM_Geographic"),
+    Prefix = "Viruses-MM-ccontinent",
+    Suffix = "csv"
+  )
+write.csv(x = mm_wil_list$k__Viruses$sel_wil_df, file = mm_wil_Viruses_csv)
+
+
+
+nrow(mm_wil_list$k__Bacteria$sel_wil_df) # 31
+nrow(mm_wil_list$k__Eukaryota$sel_wil_df) # 418
+nrow(mm_wil_list$k__Archaea$sel_wil_df) # 84
+nrow(mm_wil_list$k__Viruses$sel_wil_df) # 34
+
+
+sum(rowSums(mm_wil_list$k__Bacteria$sel_wil_df[, 1:4] <.05) >= 2) # 1
+sum(rowSums(mm_wil_list$k__Eukaryota$sel_wil_df[, 1:4] <.05) >= 2) # 31
+sum(rowSums(mm_wil_list$k__Archaea$sel_wil_df[, 1:4] <.05) >= 2) # 2
+sum(rowSums(mm_wil_list$k__Viruses$sel_wil_df[, 1:4] <.05) >= 2) # 2
+
+
+
+rownames(mm_wil_list$k__Bacteria$sel_wil_df)[rowSums(mm_wil_list$k__Bacteria$sel_wil_df[, 1:4] <.05) >= 2]
+# s__Parabacteroides_sp._20_3
+
+rownames(mm_wil_list$k__Eukaryota$sel_wil_df)[rowSums(mm_wil_list$k__Eukaryota$sel_wil_df[, 1:4] <.05) >= 2]
+
+
+
+rownames(wil_euk_sp_cohort$sel_wil_df)[rowSums(wil_euk_sp_cohort$sel_wil_df[, 1:11] <.05) >= 4]
+# s__Tetrahymena_elliotti
+# s__Endocarpon_pusillum
+# s__Microthyrium_microscopicum
+
+
+################################
+# transform the matrix to melt
+# Feature   CohDis        Select
+# Bac 1     xx_xx         sign
+# Bac 2     xx_xx         sign
+################################
+melt_wil_cohort_list <- list()
+
+melt_wil_cohort_list$k__Bacteria <- melt(as.matrix(wil_bac_sp_cohort$wil_sign_df[, 1:11]),
+                                  varnames = c("Feature", "CohDis"), 
+                                  value.name = "Select") %>% subset(Select == "sign")
+melt_wil_cohort_list$k__Eukaryota <- melt(as.matrix(wil_euk_sp_cohort$wil_sign_df[, 1:11]),
+                                   varnames = c("Feature", "CohDis"), 
+                                   value.name = "Select") %>% subset(Select == "sign")
+melt_wil_cohort_list$k__Archaea <- melt(as.matrix(wil_arc_sp_cohort$wil_sign_df[, 1:11]),
+                                 varnames = c("Feature", "CohDis"), 
+                                 value.name = "Select") %>% subset(Select == "sign")
+melt_wil_cohort_list$k__Viruses <- melt(as.matrix(wil_vir_sp_cohort$wil_sign_df[, 1:11]),
+                                 varnames = c("Feature", "CohDis"), 
+                                 value.name = "Select") %>% subset(Select == "sign")
+```
+
+
+
+### Import data
+
+```{r MM}
+
+wil_bac_sp_cohort <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds/2023-03-15-Wilcox-MN_Idx-",
+                                       "Bacteria-CohDis", "-v1.0.rds"))
+wil_euk_sp_cohort <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds/2023-03-15-Wilcox-MN_Idx-",
+                                       "Eukaryota-CohDis", "-v1.0.rds"))
+wil_arc_sp_cohort <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds/2023-03-15-Wilcox-MN_Idx-",
+                                       "Archaea-CohDis", "-v1.0.rds"))
+wil_vir_sp_cohort <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds/2023-03-15-Wilcox-MN_Idx-",
+                                       "Viruses-CohDis", "-v1.0.rds"))
+
+mm_list <- list(
+  k__Bacteria = wil_bac_sp_cohort,
+  k__Eukaryota = wil_euk_sp_cohort,
+  k__Archaea = wil_arc_sp_cohort,
+  k__Viruses = wil_vir_sp_cohort
+)
+
+require(magrittr)
+
+mm_list$k__Bacteria$wil_df %<>% select(contains("MM"))
+mm_list$k__Bacteria$wil_sign_df %<>% select(contains("MM"))
+mm_list$k__Bacteria$sel_wil_df %<>% select(contains("MM"))
+mm_list$k__Bacteria$sel_wil_sign_df %<>% select(contains("MM"))
+mm_list$k__Bacteria$FC_df %<>% select(contains("MM"))
+
+mm_list$k__Eukaryota$wil_df %<>% select(contains("MM"))
+mm_list$k__Eukaryota$wil_sign_df %<>% select(contains("MM"))
+mm_list$k__Eukaryota$sel_wil_df %<>% select(contains("MM"))
+mm_list$k__Eukaryota$sel_wil_sign_df %<>% select(contains("MM"))
+mm_list$k__Eukaryota$FC_df %<>% select(contains("MM"))
+
+mm_list$k__Archaea$wil_df %<>% select(contains("MM"))
+mm_list$k__Archaea$wil_sign_df %<>% select(contains("MM"))
+mm_list$k__Archaea$sel_wil_df %<>% select(contains("MM"))
+mm_list$k__Archaea$sel_wil_sign_df %<>% select(contains("MM"))
+mm_list$k__Archaea$FC_df %<>% select(contains("MM"))
+
+mm_list$k__Viruses$wil_df %<>% select(contains("MM"))
+mm_list$k__Viruses$wil_sign_df %<>% select(contains("MM"))
+mm_list$k__Viruses$sel_wil_df %<>% select(contains("MM"))
+mm_list$k__Viruses$sel_wil_sign_df %<>% select(contains("MM"))
+mm_list$k__Viruses$FC_df %<>% select(contains("MM"))
+
+
+```
+
+
+
+## Function
+
+### Obtain KO 
+
+```{r obtain ko}
+
+Obtain_KO <- function(feature_list){
+  ko_list <- list()
+  
+  for (i in feature_list) {
+    tmp_feat_df <- read.table(
+      file = paste0(
+        save_path_prefix,
+        "/10.Revision/00.Agg_separate/",
+        i,
+        ".emapper.sep.tsv"
+      ),
+      header = T,
+      row.names = 1,
+      comment.char = "")
+    tmp_ko <- tmp_feat_df$KEGG_ko %>% 
+      unique()
+    final_ko <- c()
+    for (j in tmp_ko) {
+      if (j == "-") {
+        next
+      }
+      k = strsplit(j, ",") %>% 
+        unlist()
+      final_ko <- c(final_ko, k)
+    }
+    
+    ko_list[[i]] <- unique(final_ko)
+  }
+  
+  freq_sort <- sort(table(table(
+    unname(unlist(ko_list))
+  )), decreasing = T)
+  return(list(freq_sort = freq_sort,
+              ko_list = ko_list))
+}
+
+```
+
+## Gene Function Prediction
+
+```{r gene}
+
+sel_feat_df <- read.table(
+  file = paste0(
+      save_path_prefix,
+      "/10.Revision/00.Agg_separate/00.manual-17feature.tsv"
+    ),
+    header = T,
+    row.names = 1, 
+    comment.char = "")
+
+sel_3_df <- sel_feat_df %>% 
+  filter(Group == 3)
+
+sel_R_df <- sel_feat_df %>% 
+  filter(EnrDep == "R")
+
+sel_NR_df <- sel_feat_df %>% 
+  filter(EnrDep == "NR")
+
+sel_3_ko <- Obtain_KO(feature_list = rownames(sel_3_df))
+sel_3_ko$freq_sort
+sel_R_ko <- Obtain_KO(feature_list = rownames(sel_R_df))
+sel_R_ko$freq_sort
+sel_NR_ko <- Obtain_KO(feature_list = rownames(sel_NR_df))
+sel_NR_ko$freq_sort
+
+
+
+
+sel_3R_df <- sel_feat_df %>% 
+  filter(EnrDep == "R", Group == 3)
+
+sel_3NR_df <- sel_feat_df %>% 
+  filter(EnrDep == "NR", Group == 3)
+
+sel_3R_ko <- Obtain_KO(feature_list = rownames(sel_3R_df))
+sel_3R_ko$freq_sort
+sel_3NR_ko <- Obtain_KO(feature_list = rownames(sel_3NR_df))
+sel_3NR_ko$freq_sort
+
+```
+
+### ClusterProfiler
+
+```{r clusterProfiler}
+
+
+sel_NR_count <- sel_NR_ko$ko_list %>% 
+  unlist() %>% 
+  gsub("^ko:", "", .) %>% 
+  table() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  arrange(desc(V1)) %>% 
+  filter(V1 >= length(sel_NR_ko$ko_list)/3*2)
+
+sel_NR_kegg <- enrichKEGG(
+  gene = rownames(sel_NR_count),
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  qvalueCutoff = 0.1)
+
+sel_NR_kegg_res <- sel_NR_kegg@result
+
+# View(sel_NR_kegg_res)
+
+sel_NR_dot1 <- dotplot(sel_NR_kegg, color = "qvalue")
+sel_NR_bar <- barplot(sel_NR_kegg,showCategory=10)
+
+################################
+
+sel_R_count <- sel_R_ko$ko_list %>% 
+  unlist() %>% 
+  gsub("^ko:", "", .) %>% 
+  table() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  arrange(desc(V1)) %>% 
+  filter(V1 >= length(sel_R_ko$ko_list)/3*2)
+
+
+sel_R_kegg <- enrichKEGG(
+  gene = rownames(sel_R_count),
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  qvalueCutoff = 0.1)
+
+sel_R_kegg_res <- sel_R_kegg@result
+
+# View(sel_R_kegg_res)
+
+sel_R_dot1 <- dotplot(sel_R_kegg, color = "qvalue")
+sel_R_bar <- barplot(sel_R_kegg,showCategory=10)
+
+###########################################
+
+sel_NR_kegg_subset <- sel_NR_kegg_res %>% 
+  filter(p.adjust < 0.1)
+
+sel_R_kegg_subset <- sel_R_kegg_res %>% 
+  filter(p.adjust < 0.1)
+
+spec_R_kegg_df <- sel_R_kegg_subset[!(sel_R_kegg_subset$ID %in% sel_NR_kegg_subset$ID), ]
+
+View(spec_R_kegg_df)
+
+spec_NR_kegg_df <- sel_NR_kegg_subset[!(sel_NR_kegg_subset$ID %in% sel_R_kegg_subset$ID), ]
+
+View(spec_NR_kegg_df)
+
+write.csv(
+  x = spec_R_kegg_df,
+  file =  paste0(
+    save_path_prefix,
+    "/10.Revision/00.Agg_separate/Res/spec_R_kegg_df.csv"))
+write.csv(
+  x = spec_NR_kegg_df,
+  file =  paste0(
+    save_path_prefix,
+    "/10.Revision/00.Agg_separate/Res/spec_NR_kegg_df.csv"))
+
+```
+
+### 3NR vs 3R
+
+```{r 3}
+
+sel_3NR_count <- sel_3NR_ko$ko_list %>% 
+  unlist() %>% 
+  gsub("^ko:", "", .) %>% 
+  table() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  arrange(desc(V1)) %>% 
+  filter(V1 == length(sel_3NR_ko$ko_list))
+
+sel_3NR_kegg <- enrichKEGG(
+  gene = rownames(sel_3NR_count),
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  qvalueCutoff = 0.1)
+
+sel_3NR_kegg_res <- sel_3NR_kegg@result
+
+# View(sel_NR_kegg_res)
+
+sel_3NR_dot1 <- dotplot(sel_3NR_kegg, color = "qvalue")
+sel_3NR_bar <- barplot(sel_3NR_kegg,showCategory=10)
+
+################################
+
+sel_3R_count <- sel_3R_ko$ko_list %>% 
+  unlist() %>% 
+  gsub("^ko:", "", .) %>% 
+  table() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  arrange(desc(V1)) %>% 
+  filter(V1 == length(sel_3R_ko$ko_list))
+
+sel_3R_kegg <- enrichKEGG(
+  gene = rownames(sel_3R_count),
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  qvalueCutoff = 0.1)
+
+sel_3R_kegg_res <- sel_3R_kegg@result
+
+# View(sel_NR_kegg_res)
+
+sel_3R_dot1 <- dotplot(sel_3R_kegg, color = "qvalue")
+sel_3R_bar <- barplot(sel_3R_kegg,showCategory=10)
+
+################################
+
+sel_3NR_kegg_subset <- sel_3NR_kegg_res %>% 
+  filter(p.adjust < 0.1)
+
+sel_3R_kegg_subset <- sel_3R_kegg_res %>% 
+  filter(p.adjust < 0.1)
+
+spec_3R_kegg_df <- sel_3R_kegg_subset[!(sel_3R_kegg_subset$ID %in% sel_3NR_kegg_subset$ID), ]
+
+View(spec_3R_kegg_df)
+
+spec_3NR_kegg_df <- sel_3NR_kegg_subset[!(sel_3NR_kegg_subset$ID %in% sel_3R_kegg_subset$ID), ]
+
+View(spec_3NR_kegg_df)
+
+
+
+```
+
+### 3 test
+
+```{r 3 test}
+all_3NR_count <- sel_3NR_ko$ko_list %>% 
+  unlist() %>% 
+  gsub("^ko:", "", .) %>% 
+  table() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  arrange(desc(V1))
+
+all_3R_count <- sel_3R_ko$ko_list %>% 
+  unlist() %>% 
+  gsub("^ko:", "", .) %>% 
+  table() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  arrange(desc(V1))
+
+spe_3NR_gene <- rownames(all_3NR_count)[!(rownames(all_3NR_count) %in% rownames((all_3R_count)))]
+length(spe_3NR_gene)
+# [1] 2402
+
+spe_3R_gene <- rownames(all_3R_count)[!(rownames(all_3R_count) %in% rownames((all_3NR_count)))]
+length(spe_3R_gene)
+# [1] 1577
+
+spe_3NR_kegg <- enrichKEGG(
+  gene = spe_3NR_gene,
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  # qvalueCutoff = 0.05)
+  qvalueCutoff = 0.01)
+
+
+
+spe_3R_kegg <- enrichKEGG(
+  gene = spe_3R_gene,
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  # qvalueCutoff = 0.05)
+  qvalueCutoff = 0.01)
+
+
+# # test
+# spe_3NR_kegg <- enrichKEGG(
+#   gene = spe_3NR_gene,
+#   organism = "hsa",
+#   pAdjustMethod = "BH",
+#   keyType = "kegg",
+#   qvalueCutoff = 0.1)
+# 
+# spe_3R_kegg <- enrichKEGG(
+#   gene = spe_3R_gene,
+#   organism = "hsa",
+#   pAdjustMethod = "BH",
+#   keyType = "kegg",
+#   qvalueCutoff = 0.1)
+# 
+
+
+spe_3NR_kegg_subset <- spe_3NR_kegg %>% 
+  # filter(p.adjust < 0.1)
+  # filter(p.adjust < 0.05)
+  filter(p.adjust < 0.01)
+
+spe_3R_kegg_subset <- spe_3R_kegg %>% 
+  # filter(p.adjust < 0.1)
+  # filter(p.adjust < 0.05)
+  filter(p.adjust < 0.01)
+
+spec_3R_kegg_df2 <- spe_3R_kegg_subset[!(spe_3R_kegg_subset$ID %in% spe_3NR_kegg_subset$ID), ]
+
+View(spec_3R_kegg_df2)
+nrow(spec_3R_kegg_df2)
+
+spec_3NR_kegg_df2 <- spe_3NR_kegg_subset[!(spe_3NR_kegg_subset$ID %in% spe_3R_kegg_subset$ID), ]
+
+View(spec_3NR_kegg_df2)
+nrow(spec_3NR_kegg_df2)
+
+merge_3_kegg <- rbind.data.frame(
+  spec_3R_kegg_df2,
+  spec_3NR_kegg_df2 %>% 
+    mutate(Count = -Count)
+) %>% 
+  arrange(desc(Count)) %>% 
+  filter(abs(Count) > 10) %>%
+  mutate(nlog10pAdj = -log10(p.adjust)) %>% 
+  # select(c("ID", "Description", "Count", "nlog10pAdj")) %>% 
+  mutate(ID = factor(ID, levels = ID),
+         Description = factor(Description, levels = Description),
+         R_NR = ifelse(Count >0, "R", "NR"))
+
+dim(merge_3_kegg)
+
+kegg_bar <- ggplot(merge_3_kegg, aes(x = Description, y = Count, fill = R_NR)) + 
+  geom_bar(stat = "identity", color = 'black') + 
+  coord_flip() +
+  theme_classic() +
+  # theme_bw() + 
+  scale_fill_manual(values = respond_col)
+
+
+kegg_bar_pdf <-
+  FileCreate(
+    DirPath = paste0(save_path_prefix, "/10.Revision/FunctionPred/3NR_R_overlap"),
+    Prefix = "kegg_bar_plot",
+    Suffix = "pdf"
+  )
+pdf(kegg_bar_pdf, width = 15, height = 15)
+plot(kegg_bar)
+plot(kegg_bar + theme(axis.text = element_blank()))
+
+dev.off()
+
+kegg_bar_csv <-
+  FileCreate(
+    DirPath = paste0(save_path_prefix, "/10.Revision/FunctionPred/3NR_R_overlap"),
+    Prefix = "kegg_bar_matrix",
+    Suffix = "csv"
+  )
+write.csv(x = merge_3_kegg, file = kegg_bar_csv)
+
+
+merge_3_kegg2 <- rbind.data.frame(
+  spec_3R_kegg_df2,
+  spec_3NR_kegg_df2 %>% 
+    mutate(Count = -Count)
+) %>% 
+  arrange(desc(Count)) %>% 
+  filter(abs(Count) > 10) %>%
+  filter(!str_detect(Description, '- fly|- yeast|- plant')) %>% 
+  mutate(nlog10pAdj = -log10(p.adjust)) %>% 
+  # select(c("ID", "Description", "Count", "nlog10pAdj")) %>% 
+  mutate(ID = factor(ID, levels = ID),
+         Description = factor(Description, levels = Description),
+         R_NR = ifelse(Count >0, "R", "NR"))
+
+  
+dim(merge_3_kegg2)
+
+kegg_bar2 <- ggplot(merge_3_kegg2, aes(x = Description, y = Count, fill = R_NR)) + 
+  geom_bar(stat = "identity", color = 'black') + 
+  coord_flip() +
+  theme_classic() +
+  # theme_bw() + 
+  scale_fill_manual(values = respond_col)
+
+
+kegg_bar_pdf2 <-
+  FileCreate(
+    DirPath = paste0(save_path_prefix, "/10.Revision/FunctionPred/3NR_R_overlap"),
+    Prefix = "kegg_bar_plot-remove_subspecies",
+    Suffix = "pdf"
+  )
+pdf(kegg_bar_pdf2, width = 15, height = 15)
+plot(kegg_bar2)
+plot(kegg_bar2 + theme(axis.text = element_blank()))
+
+dev.off()
+
+kegg_bar_csv2 <-
+  FileCreate(
+    DirPath = paste0(save_path_prefix, "/10.Revision/FunctionPred/3NR_R_overlap"),
+    Prefix = "kegg_bar_matrix-remove_subspecies",
+    Suffix = "csv"
+  )
+write.csv(x = merge_3_kegg2, file = kegg_bar_csv2)
+
+
+# 
+# kegg_bar2 <-
+#   ggplot(merge_3_kegg2,
+#          aes(
+#            x = Description,
+#            y = Count,
+#            fill = R_NR,
+#            alpha = nlog10pAdj
+#          )) +
+#   geom_bar(stat = "identity", color = 'black') +
+#   coord_flip() +
+#   theme_classic() +
+#   # theme_bw() +
+#   scale_fill_manual(values = respond_col) + 
+#   scale_alpha_continuous(range = c(.7, 1))
+
+
+
+
+
+
+
+
+
+
+
+# fenshu2xiaoshu <- function(ratio) {
+#   sapply(ratio, function(x)
+#     as.numeric(strsplit(x, "/")[[1]][1]) / as.numeric(strsplit(x, "/")[[1]][2]))
+# }
+# 
+# spec_3NR_kegg_df2_ <- spec_3NR_kegg_df2 %>% 
+#   mutate(PW_GeneRatio = Count / as.numeric(gsub("\\/.+$", "", BgRatio)),
+#          FoldEnrichment = fenshu2xiaoshu(GeneRatio)/fenshu2xiaoshu(BgRatio))
+# 
+# 
+# 
+# spec_3R_kegg_df2_ <- spec_3R_kegg_df2 %>% 
+#   mutate(PW_GeneRatio = Count / as.numeric(gsub("\\/.+$", "", BgRatio)),
+#          FoldEnrichment = fenshu2xiaoshu(GeneRatio)/fenshu2xiaoshu(BgRatio))
+
+
+
+```
+
+
+### MKEGG
+
+```{r mkegg}
+spe_3R_mkegg <- enrichMKEGG(
+  gene = spe_3R_gene,
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  # qvalueCutoff = 0.05)
+  qvalueCutoff = 0.1)
+
+spe_3NR_mkegg <- enrichMKEGG(
+  gene = spe_3NR_gene,
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  # qvalueCutoff = 0.05)
+  qvalueCutoff = 0.1)
+
+
+spe_3NR_mkegg_subset <- spe_3NR_mkegg %>% 
+  # filter(p.adjust < 0.1)
+  # filter(p.adjust < 0.05)
+  filter(p.adjust < 0.1)
+
+spe_3R_mkegg_subset <- spe_3R_mkegg %>% 
+  # filter(p.adjust < 0.1)
+  # filter(p.adjust < 0.05)
+  filter(p.adjust < 0.01)
+
+
+
+
+
+```
+
+### Upset for the genes
+
+```{r upset genes}
+require(ComplexHeatmap)
+
+
+sel_NR_count <- sel_NR_ko$ko_list %>% 
+  unlist() %>% 
+  gsub("^ko:", "", .) %>% 
+  table() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  arrange(desc(V1)) %>% 
+  filter(V1 >= length(sel_NR_ko$ko_list)/2)
+
+overlap_NR_list <- list()
+
+for (i in names(sel_NR_ko$ko_list)) {
+  tmp_ko <- gsub("ko:", "", sel_NR_ko$ko_list[[i]])
+  overlap_NR_list[[i]] <-
+    tmp_ko[tmp_ko %in% rownames(sel_NR_count)]
+}
+NR_lt <- overlap_NR_list
+NR_m1 <- make_comb_mat(NR_lt)
+UpSet(NR_m1)
+
+########################################################
+
+
+
+sel_R_count <- sel_R_ko$ko_list %>% 
+  unlist() %>% 
+  gsub("^ko:", "", .) %>% 
+  table() %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  arrange(desc(V1)) %>% 
+  filter(V1 >= length(sel_R_ko$ko_list)/2)
+
+overlap_R_list <- list()
+
+for (i in names(sel_R_ko$ko_list)) {
+  tmp_ko <- gsub("ko:", "", sel_R_ko$ko_list[[i]])
+  overlap_R_list[[i]] <-
+    tmp_ko[tmp_ko %in% rownames(sel_R_count)]
+}
+R_lt <- overlap_R_list
+R_m1 <- make_comb_mat(R_lt)
+UpSet(R_m1)
+
+
+
+```
+
+### add important feature box plot
+
+```{r add box plot}
+
+# bac_temp_bx <- cbind.data.frame(
+#  bICI_ds_list$k__Bacteria$tax_table$Species[c(28415, 27750, 26954),] %>% t(),
+#  bICI_ds_list$k__Bacteria$sample_table
+# ) %>% 
+#   set_colnames(ShortName(colnames(.)))
+
+bac_relab_bx <- cbind.data.frame(
+ (bICI_ds_list$k__Bacteria$taxa_abund$Species[c(6, 55, 71),]*100) %>% t(),
+ bICI_ds_list$k__Bacteria$sample_table
+) %>% 
+  set_colnames(ShortName(colnames(.)))
+
+fp_bx <- ggplot(
+  data = bac_relab_bx,
+  aes(x = Response,
+      y = log10(s__Faecalibacterium_prausnitzii),
+      col = Response)) + 
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter() +
+  stat_compare_means() + 
+  scale_color_manual(values = respond_col) + 
+  theme_bw() + 
+  ylim(c(-2.5, 1.5))
+
+cc_bx <- ggplot(
+  data = bac_relab_bx,
+  aes(x = Response,
+      y = log10(s__Coprococcus_comes),
+      col = Response)) + 
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter() +
+  stat_compare_means() + 
+  scale_color_manual(values = respond_col) + 
+  theme_bw() + 
+  ylim(c(-3, 1))
+
+hh_bx <- ggplot(
+  data = bac_relab_bx,
+  aes(x = Response,
+      y = log10(s__Hungatella_hathewayi),
+      col = Response)) + 
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter(width = .2) +
+  scale_color_manual(values = respond_col) + 
+  theme_bw() + 
+  stat_compare_means() + 
+  ylim(c(-3, 1))
+
+```
+
+#### Euk
+
+```{r euk box}
+
+
+euk_relab_bx <- cbind.data.frame(
+ (bICI_ds_list$k__Eukaryota$taxa_abund$Species[c(209, 1755),]*100) %>% t(),
+ bICI_ds_list$k__Eukaryota$sample_table
+) %>% 
+  set_colnames(ShortName(colnames(.)))
+
+
+ns_bx <- ggplot(
+  data = euk_relab_bx,
+  aes(x = Response,
+      y = log10(s__Nemania_serpens),
+      col = Response)) + 
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter() +
+  stat_compare_means() + 
+  scale_color_manual(values = respond_col) + 
+  theme_bw() 
+
+hp_bx <- ggplot(
+  data = euk_relab_bx,
+  aes(x = Response,
+      y = log10(s__Hyphopichia_pseudoburtonii),
+      col = Response)) + 
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter() +
+  stat_compare_means() + 
+  scale_color_manual(values = respond_col) + 
+  theme_bw() 
+
+
+
+```
+
+## end
+
+
+
+<!--
+### Confounder (Eukaryota)
+
+```{r bacteria}
+euk_meta <- bICI_ds$k__Eukaryota$sample_table
+
+
+euk_meta <- euk_meta %>% 
+  # age
+  mutate(age_factor = factor(
+    cut(.$Age, breaks = quantile(.$Age, na.rm = T), labels = c(1,2,3,4)))) %>%
+  # cohort
+  mutate(cohort_factor = factor(
+    .$Cohort_name)) %>% 
+  # antibiotics
+  mutate(antibiotics_factor = factor(.$Antibiotics)) %>% 
+  # gender
+  mutate(gender_factor = factor(.$Gender)) %>% 
+  # cancer type
+  mutate(cancer_factor = factor(.$Disease)) %>% 
+  # ICI
+  mutate(ICI_factor = factor(.$ICI)) %>% 
+  # PFS
+  mutate(PFS_factor = factor(ifelse(
+    is.na(.$PFS), NA,
+    ifelse(
+      .$PFS > 365*5, 1, 2
+    )))) %>% 
+  # Continent
+  mutate(geographic_factor = factor(.$Continent))
+  
+
+euk_rel <- bICI_ds$k__Eukaryota$taxa_abund$Species
+
+euk_rel_fil <- euk_rel[rowMeans(euk_rel) >= 1e-4,]
+
+ss.disease <- apply(euk_rel_fil, 1, FUN=function(x, label){
+  rank.x <- rank(x)/length(x)
+  ss.tot <- sum((rank.x - mean(rank.x))^2)/length(rank.x)
+  ss.o.i <- sum(vapply(unique(label), function(l){
+    sum((rank.x[label==l] - mean(rank.x[label==l]))^2)
+    }, FUN.VALUE = double(1)))/length(rank.x)
+  return(1-ss.o.i/ss.tot)
+}, label=euk_meta %>% pull(Response))
+
+
+
+wil_euk_sp_cohort <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds/2023-03-15-Wilcox-MN_Idx-",
+                                         "Eukaryota-CohDis", "-v1.0.rds"))
+wil_euk_sp_mn <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN/rds/2023-03-15-Wilcox-MN_Idx-",
+                                         "Eukaryota", "-bICI-v1.0.rds"))
+
+euk.t.mean <- apply(euk_rel_fil, 1, mean, trim=0.1)
+
+
+euk.feat.sign <- rownames(euk_rel_fil) %in% c(rownames(wil_euk_sp_cohort$sel_wil_df),rownames(wil_euk_sp_mn$sel_wil_df))
+
+euk.df.plot.all <- tibble(
+  species=rownames(euk_rel_fil),
+  disease=ss.disease,
+  t.mean=euk.t.mean,
+  meta.significance=euk.feat.sign)
+
+# df.list <- list()
+for (meta.var in c('age_factor', 'cohort_factor', 
+                   'antibiotics_factor','gender_factor', 
+                   'cancer_factor', 'ICI_factor', 
+                   'PFS_factor', "geographic_factor")) {
+  
+
+  cat('###############################\n', meta.var, '\n')
+  meta.c <- euk_meta %>%
+    filter(!is.na(eval(parse(text=meta.var))))
+
+  cat('After filtering, the distribution of variables is:\n')
+  print(table(meta.c$Response, meta.c %>% pull(meta.var)))
+  feat.red <- euk_rel_fil[,meta.c$SampleID]
+
+  cat('Calculating variance explained by meta-variable...\n')
+  ss.var <- apply(feat.red, 1, FUN=function(x, label){
+    rank.x <- rank(x)/length(x)
+    ss.tot <- sum((rank.x - mean(rank.x))^2)/length(rank.x)
+    ss.o.i <- sum(vapply(unique(label), function(l){
+      sum((rank.x[label==l] - mean(rank.x[label==l]))^2)
+    }, FUN.VALUE = double(1)))/length(rank.x)
+    return(1 - ss.o.i/ss.tot)
+  }, label=meta.c %>% pull(meta.var))
+  euk.df.plot.all[[meta.var]] <- ss.var
+
+  cat('Calculating association with the meta-variable...\n')
+  if (meta.c %>% pull(meta.var) %>% unique %>% length > 2){
+    meta.significance <- apply(feat.red, 1, FUN=function(x, var){
+      kruskal.test(x~as.factor(var))$p.value
+    }, var=meta.c %>% pull(meta.var))
+  } else {
+    meta.significance <- apply(feat.red, 1, FUN=function(x, var){
+      wilcox.test(x~as.factor(var))$p.value
+    }, var=meta.c %>% pull(meta.var))
+  }
+  meta.significance <- p.adjust(meta.significance, method='fdr')
+  euk.df.plot.all[[paste0(meta.var, '.significance')]] <- meta.significance
+  cat('\n')
+}
+
+euk.df.plot.all <- euk.df.plot.all %>%
+  gather(key=type, value=meta, -species, -disease,
+         -t.mean,  -meta.significance) %>%
+  filter(!str_detect(type, '.significance')) %>%
+  filter(complete.cases(.)) 
+
+
+euk.g.all <- euk.df.plot.all %>%
+  mutate(facet=case_when(type=='age_factor' ~ 'Age',
+                         type=='antibiotics_factor' ~ 'Antibiotic',
+                         type=='gender_factor' ~ 'Gender',
+                         type=='cancer_factor' ~ 'Cancer type',
+                         type=='cohort_factor' ~ 'Cohort',
+                         type == 'ICI_factor' ~ "ICI method",
+                         type == 'PFS_factor' ~ "5 year survival",
+                         type == 'geographic_factor' ~ "Geographic",
+                         TRUE ~ type)) %>%
+  mutate(facet = factor(facet, levels = c('Cohort', 'Cancer type', 'Geographic', 
+                                          "Age", "5 year survival", "Antibiotic",
+                                          "Gender", "ICI method"))) %>% 
+  ggplot(aes(x=disease, y=meta, size=t.mean+1e-08, col=meta.significance)) +
+    geom_point(shape=19) +
+    xlab('Variance explained by disease status') +
+    ylab('Variance explained by metadata variable') +
+    theme_bw() +
+    facet_wrap(~facet, ncol=3) +
+    theme(strip.background = element_blank(),
+          panel.grid.minor = element_blank()) +
+    scale_x_continuous(breaks = seq(from=0, to=0.05, by=0.01)) +
+    scale_y_continuous(breaks=seq(from=0, to=0.5, by=0.1)) +
+    # scale_colour_manual(values = alpha(c('black', '#CC071E'),
+    #                                    alpha=c(0.1, .75)),
+    scale_colour_manual(values = alpha(c('black', 'black'),
+                                       alpha=c(0.1, 0.1)),
+                        name=paste0('Significance\n(', alpha.meta, ' FDR)')) +
+    scale_size_area(name='Trimmed mean\nabundance',
+               breaks=c(1e-05, 1e-03, 1e-02)) +
+    guides( size = "legend", colour='legend')
+
+euk.g.all + theme(text = element_blank(),  legend.position = "none")
+
+euk_confounder_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "/10.Revision/Confounder"),
+                            Prefix = "Eukaryota-confounder-scatter",
+                            Suffix = "pdf")
+
+pdf(euk_confounder_pdf, width = 7, height = 7)
+plot(euk.g.all)
+plot(euk.g.all + theme(text = element_blank(),  legend.position = "none"))
+dev.off()
+
+
+
+
+```
+
+### Confounder (Archaea)
+
+```{r bacteria}
+arc_meta <- bICI_ds$k__Archaea$sample_table
+
+
+arc_meta <- arc_meta %>% 
+  # age
+  mutate(age_factor = factor(
+    cut(.$Age, breaks = quantile(.$Age, na.rm = T), labels = c(1,2,3,4)))) %>%
+  # cohort
+  mutate(cohort_factor = factor(
+    .$Cohort_name)) %>% 
+  # antibiotics
+  mutate(antibiotics_factor = factor(.$Antibiotics)) %>% 
+  # gender
+  mutate(gender_factor = factor(.$Gender)) %>% 
+  # cancer type
+  mutate(cancer_factor = factor(.$Disease)) %>% 
+  # ICI
+  mutate(ICI_factor = factor(.$ICI)) %>% 
+  # PFS
+  mutate(PFS_factor = factor(ifelse(
+    is.na(.$PFS), NA,
+    ifelse(
+      .$PFS > 365*5, 1, 2
+    )))) %>% 
+  # Continent
+  mutate(geographic_factor = factor(.$Continent))
+  
+
+arc_rel <- bICI_ds$k__Archaea$taxa_abund$Species
+
+arc_rel_fil <- arc_rel[rowMeans(arc_rel) >= 1e-4,]
+
+ss.disease <- apply(arc_rel_fil, 1, FUN=function(x, label){
+  rank.x <- rank(x)/length(x)
+  ss.tot <- sum((rank.x - mean(rank.x))^2)/length(rank.x)
+  ss.o.i <- sum(vapply(unique(label), function(l){
+    sum((rank.x[label==l] - mean(rank.x[label==l]))^2)
+    }, FUN.VALUE = double(1)))/length(rank.x)
+  return(1-ss.o.i/ss.tot)
+}, label=arc_meta %>% pull(Response))
+
+
+
+wil_arc_sp_cohort <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds/2023-03-15-Wilcox-MN_Idx-",
+                                         "Archaea-CohDis", "-v1.0.rds"))
+wil_arc_sp_mn <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN/rds/2023-03-15-Wilcox-MN_Idx-",
+                                         "Archaea", "-bICI-v1.0.rds"))
+
+arc.t.mean <- apply(arc_rel_fil, 1, mean, trim=0.1)
+
+
+arc.feat.sign <- rownames(arc_rel_fil) %in% c(rownames(wil_arc_sp_cohort$sel_wil_df),rownames(wil_arc_sp_mn$sel_wil_df))
+
+arc.df.plot.all <- tibble(
+  species=rownames(arc_rel_fil),
+  disease=ss.disease,
+  t.mean=arc.t.mean,
+  meta.significance=arc.feat.sign)
+
+# df.list <- list()
+for (meta.var in c('age_factor', 'cohort_factor', 
+                   'antibiotics_factor','gender_factor', 
+                   'cancer_factor', 'ICI_factor', 
+                   'PFS_factor', "geographic_factor")) {
+  
+
+  cat('###############################\n', meta.var, '\n')
+  meta.c <- arc_meta %>%
+    filter(!is.na(eval(parse(text=meta.var))))
+
+  cat('After filtering, the distribution of variables is:\n')
+  print(table(meta.c$Response, meta.c %>% pull(meta.var)))
+  feat.red <- arc_rel_fil[,meta.c$SampleID]
+
+  cat('Calculating variance explained by meta-variable...\n')
+  ss.var <- apply(feat.red, 1, FUN=function(x, label){
+    rank.x <- rank(x)/length(x)
+    ss.tot <- sum((rank.x - mean(rank.x))^2)/length(rank.x)
+    ss.o.i <- sum(vapply(unique(label), function(l){
+      sum((rank.x[label==l] - mean(rank.x[label==l]))^2)
+    }, FUN.VALUE = double(1)))/length(rank.x)
+    return(1 - ss.o.i/ss.tot)
+  }, label=meta.c %>% pull(meta.var))
+  arc.df.plot.all[[meta.var]] <- ss.var
+
+  cat('Calculating association with the meta-variable...\n')
+  if (meta.c %>% pull(meta.var) %>% unique %>% length > 2){
+    meta.significance <- apply(feat.red, 1, FUN=function(x, var){
+      kruskal.test(x~as.factor(var))$p.value
+    }, var=meta.c %>% pull(meta.var))
+  } else {
+    meta.significance <- apply(feat.red, 1, FUN=function(x, var){
+      wilcox.test(x~as.factor(var))$p.value
+    }, var=meta.c %>% pull(meta.var))
+  }
+  meta.significance <- p.adjust(meta.significance, method='fdr')
+  arc.df.plot.all[[paste0(meta.var, '.significance')]] <- meta.significance
+  cat('\n')
+}
+
+arc.df.plot.all <- arc.df.plot.all %>%
+  gather(key=type, value=meta, -species, -disease,
+         -t.mean,  -meta.significance) %>%
+  filter(!str_detect(type, '.significance')) %>%
+  filter(complete.cases(.)) 
+
+
+arc.g.all <- arc.df.plot.all %>%
+  mutate(facet=case_when(type=='age_factor' ~ 'Age',
+                         type=='antibiotics_factor' ~ 'Antibiotic',
+                         type=='gender_factor' ~ 'Gender',
+                         type=='cancer_factor' ~ 'Cancer type',
+                         type=='cohort_factor' ~ 'Cohort',
+                         type == 'ICI_factor' ~ "ICI method",
+                         type == 'PFS_factor' ~ "5 year survival",
+                         type == 'geographic_factor' ~ "Geographic",
+                         TRUE ~ type)) %>%
+  mutate(facet = factor(facet, levels = c('Cohort', 'Cancer type', 'Geographic', 
+                                          "Age", "5 year survival", "Antibiotic",
+                                          "Gender", "ICI method"))) %>% 
+  ggplot(aes(x=disease, y=meta, size=t.mean+1e-08, col=meta.significance)) +
+    geom_point(shape=19) +
+    xlab('Variance explained by disease status') +
+    ylab('Variance explained by metadata variable') +
+    theme_bw() +
+    facet_wrap(~facet, ncol=3) +
+    theme(strip.background = element_blank(),
+          panel.grid.minor = element_blank()) +
+    scale_x_continuous(breaks = seq(from=0, to=0.05, by=0.01)) +
+    scale_y_continuous(breaks=seq(from=0, to=0.5, by=0.1)) +
+    # scale_colour_manual(values = alpha(c('black', '#CC071E'),
+    #                                    alpha=c(0.1, .75)),
+    scale_colour_manual(values = alpha(c('black', 'black'),
+                                       alpha=c(0.1, 0.1)),
+                        name=paste0('Significance\n(', alpha.meta, ' FDR)')) +
+    scale_size_area(name='Trimmed mean\nabundance',
+               breaks=c(1e-05, 1e-03, 1e-02)) +
+    guides( size = "legend", colour='legend')
+
+arc.g.all + theme(text = element_blank(),  legend.position = "none")
+
+arc_confounder_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "/10.Revision/Confounder"),
+                            Prefix = "Archaea-confounder-scatter",
+                            Suffix = "pdf")
+
+pdf(arc_confounder_pdf, width = 7, height = 7)
+plot(arc.g.all)
+plot(arc.g.all + theme(text = element_blank(),  legend.position = "none"))
+dev.off()
+
+
+
+
+```
+
+### Confounder (Viruses)
+
+```{r bacteria}
+vir_meta <- bICI_ds$k__Viruses$sample_table
+
+
+vir_meta <- vir_meta %>% 
+  # age
+  mutate(age_factor = factor(
+    cut(.$Age, breaks = quantile(.$Age, na.rm = T), labels = c(1,2,3,4)))) %>%
+  # cohort
+  mutate(cohort_factor = factor(
+    .$Cohort_name)) %>% 
+  # antibiotics
+  mutate(antibiotics_factor = factor(.$Antibiotics)) %>% 
+  # gender
+  mutate(gender_factor = factor(.$Gender)) %>% 
+  # cancer type
+  mutate(cancer_factor = factor(.$Disease)) %>% 
+  # ICI
+  mutate(ICI_factor = factor(.$ICI)) %>% 
+  # PFS
+  mutate(PFS_factor = factor(ifelse(
+    is.na(.$PFS), NA,
+    ifelse(
+      .$PFS > 365*5, 1, 2
+    )))) %>% 
+  # Continent
+  mutate(geographic_factor = factor(.$Continent))
+  
+
+vir_rel <- bICI_ds$k__Viruses$taxa_abund$Species
+
+vir_rel_fil <- vir_rel[rowMeans(vir_rel) >= 1e-4,]
+
+ss.disease <- apply(vir_rel_fil, 1, FUN=function(x, label){
+  rank.x <- rank(x)/length(x)
+  ss.tot <- sum((rank.x - mean(rank.x))^2)/length(rank.x)
+  ss.o.i <- sum(vapply(unique(label), function(l){
+    sum((rank.x[label==l] - mean(rank.x[label==l]))^2)
+    }, FUN.VALUE = double(1)))/length(rank.x)
+  return(1-ss.o.i/ss.tot)
+}, label=vir_meta %>% pull(Response))
+
+
+
+wil_vir_sp_cohort <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds/2023-03-15-Wilcox-MN_Idx-",
+                                         "Viruses-CohDis", "-v1.0.rds"))
+wil_vir_sp_mn <- readRDS(file = paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN/rds/2023-03-15-Wilcox-MN_Idx-",
+                                         "Viruses", "-bICI-v1.0.rds"))
+
+vir.t.mean <- apply(vir_rel_fil, 1, mean, trim=0.1)
+
+
+vir.feat.sign <- rownames(vir_rel_fil) %in% c(rownames(wil_vir_sp_cohort$sel_wil_df),rownames(wil_vir_sp_mn$sel_wil_df))
+
+vir.df.plot.all <- tibble(
+  species=rownames(vir_rel_fil),
+  disease=ss.disease,
+  t.mean=vir.t.mean,
+  meta.significance=vir.feat.sign)
+
+# df.list <- list()
+for (meta.var in c('age_factor', 'cohort_factor', 
+                   'antibiotics_factor','gender_factor', 
+                   'cancer_factor', 'ICI_factor', 
+                   'PFS_factor', "geographic_factor")) {
+  
+
+  cat('###############################\n', meta.var, '\n')
+  meta.c <- vir_meta %>%
+    filter(!is.na(eval(parse(text=meta.var))))
+
+  cat('After filtering, the distribution of variables is:\n')
+  print(table(meta.c$Response, meta.c %>% pull(meta.var)))
+  feat.red <- vir_rel_fil[,meta.c$SampleID]
+
+  cat('Calculating variance explained by meta-variable...\n')
+  ss.var <- apply(feat.red, 1, FUN=function(x, label){
+    rank.x <- rank(x)/length(x)
+    ss.tot <- sum((rank.x - mean(rank.x))^2)/length(rank.x)
+    ss.o.i <- sum(vapply(unique(label), function(l){
+      sum((rank.x[label==l] - mean(rank.x[label==l]))^2)
+    }, FUN.VALUE = double(1)))/length(rank.x)
+    return(1 - ss.o.i/ss.tot)
+  }, label=meta.c %>% pull(meta.var))
+  vir.df.plot.all[[meta.var]] <- ss.var
+
+  cat('Calculating association with the meta-variable...\n')
+  if (meta.c %>% pull(meta.var) %>% unique %>% length > 2){
+    meta.significance <- apply(feat.red, 1, FUN=function(x, var){
+      kruskal.test(x~as.factor(var))$p.value
+    }, var=meta.c %>% pull(meta.var))
+  } else {
+    meta.significance <- apply(feat.red, 1, FUN=function(x, var){
+      wilcox.test(x~as.factor(var))$p.value
+    }, var=meta.c %>% pull(meta.var))
+  }
+  meta.significance <- p.adjust(meta.significance, method='fdr')
+  vir.df.plot.all[[paste0(meta.var, '.significance')]] <- meta.significance
+  cat('\n')
+}
+
+vir.df.plot.all <- vir.df.plot.all %>%
+  gather(key=type, value=meta, -species, -disease,
+         -t.mean,  -meta.significance) %>%
+  filter(!str_detect(type, '.significance')) %>%
+  filter(complete.cases(.)) 
+
+
+vir.g.all <- vir.df.plot.all %>%
+  mutate(facet=case_when(type=='age_factor' ~ 'Age',
+                         type=='antibiotics_factor' ~ 'Antibiotic',
+                         type=='gender_factor' ~ 'Gender',
+                         type=='cancer_factor' ~ 'Cancer type',
+                         type=='cohort_factor' ~ 'Cohort',
+                         type == 'ICI_factor' ~ "ICI method",
+                         type == 'PFS_factor' ~ "5 year survival",
+                         type == 'geographic_factor' ~ "Geographic",
+                         TRUE ~ type)) %>%
+  mutate(facet = factor(facet, levels = c('Cohort', 'Cancer type', 'Geographic', 
+                                          "Age", "5 year survival", "Antibiotic",
+                                          "Gender", "ICI method"))) %>% 
+  ggplot(aes(x=disease, y=meta, size=t.mean+1e-08, col=meta.significance)) +
+    geom_point(shape=19) +
+    xlab('Variance explained by disease status') +
+    ylab('Variance explained by metadata variable') +
+    theme_bw() +
+    facet_wrap(~facet, ncol=3) +
+    theme(strip.background = element_blank(),
+          panel.grid.minor = element_blank()) +
+    scale_x_continuous(breaks = seq(from=0, to=0.05, by=0.01)) +
+    scale_y_continuous(breaks=seq(from=0, to=0.5, by=0.1)) +
+    # scale_colour_manual(values = alpha(c('black', '#CC071E'),
+    #                                    alpha=c(0.1, .75)),
+    scale_colour_manual(values = alpha(c('black', 'black'),
+                                       alpha=c(0.1, 0.1)),
+                        name=paste0('Significance\n(', alpha.meta, ' FDR)')) +
+    scale_size_area(name='Trimmed mean\nabundance',
+               breaks=c(1e-05, 1e-03, 1e-02)) +
+    guides( size = "legend", colour='legend')
+
+vir.g.all + theme(text = element_blank(),  legend.position = "none")
+
+vir_confounder_pdf <- FileCreate(DirPath = paste0(save_path_prefix, "/10.Revision/Confounder"),
+                            Prefix = "Viruses-confounder-scatter",
+                            Suffix = "pdf")
+
+pdf(vir_confounder_pdf, width = 7, height = 7)
+plot(vir.g.all)
+plot(vir.g.all + theme(text = element_blank(),  legend.position = "none"))
+dev.off()
+
+
+
+
+```
+
+
+### different Genes
+
+```{r different genes}
+spec_R_gene <- rownames(sel_R_count)[!(rownames(sel_R_count) %in% rownames(sel_NR_count))]
+length(spec_R_gene)
+
+
+
+spec_NR_gene <- rownames(sel_NR_count)[!(rownames(sel_NR_count) %in% rownames(sel_R_count))]
+length(spec_NR_gene)
+
+
+
+sel_R_kegg2 <- enrichKEGG(
+  gene = spec_R_gene,
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  qvalueCutoff = 0.1)
+
+sel_R_kegg_res2 <- sel_R_kegg2@result %>% 
+  filter(qvalue <0.05)
+
+
+sel_NR_kegg2 <- enrichKEGG(
+  gene = spec_NR_gene,
+  organism = "ko",
+  pAdjustMethod = "BH",
+  keyType = "kegg",
+  qvalueCutoff = 0.1)
+
+sel_NR_kegg_res2 <- sel_NR_kegg2@result %>% 
+  filter(qvalue <0.05)
+
+spec_R_kegg_df2 <- sel_R_kegg_res2[!(sel_R_kegg_res2$ID %in% sel_NR_kegg_res2$ID), ]
+spec_NR_kegg_df2 <- sel_NR_kegg_res2[!(sel_NR_kegg_res2$ID %in% sel_R_kegg_res2$ID), ]
+
+```
+
+-->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

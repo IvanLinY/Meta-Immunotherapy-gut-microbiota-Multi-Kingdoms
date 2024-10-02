@@ -1,0 +1,1109 @@
+---
+title: "Phylogenetics tree"
+author: "Ifan LIN"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages and functions
+
+```{r packages}
+require(Hmisc) # rcorr, flattenCorrMatrix
+
+```
+
+### Fisher z test
+
+```{r fisher z test}
+Fisher_z_test <- function( cor1, cor2){
+  
+  if(!((nrow(cor1$r) == nrow(cor2$r)) & (ncol(cor1$r) == ncol(cor2$r)))){
+    message("dim(cor1$r) != dim(cor2$r)")
+    return()
+  }
+  fisher_z_df <- matrix(data = NA, 
+                        nrow = nrow(cor1$r),
+                        ncol = ncol(cor1$r))
+  fisher_p_df <- fisher_z_df
+  for (i in 1:nrow(cor1$r)) {
+    for (j in 1:ncol(cor1$r)) {
+      r1 <- cor1$r[i, j]
+      r2 <- cor2$r[i, j]
+      n1 <- cor1$n[i, j]
+      n2 <- cor2$n[i, j]
+      z1 <- 0.5*log((1+r1)/(1-r1))
+      z2 <- 0.5*log((1+r2)/(1-r2))
+      diff.z <- (z1-z2)/(sqrt(1/(n1-3)+1/(n2-3)))
+      p <- 2*pnorm(abs(diff.z), lower=F)
+      fisher_z_df[i, j] <- diff.z
+      fisher_p_df[i, j] <- p
+        
+    }
+  }
+  dimnames(fisher_z_df) <- dimnames(cor1$r)
+  dimnames(fisher_p_df) <- dimnames(cor1$r)
+  return(list(z = fisher_z_df, p = fisher_p_df))
+}
+
+```
+
+## import data
+
+```{r }
+
+# Wilcox results 
+wil_res <- list()
+
+## cancer type
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN/rds"))
+wil_res[["CancerType"]]$k__Bacteria <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Bacteria-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Eukaryota <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Eukaryota-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Archaea <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Archaea-bICI-v1.0.rds"))
+wil_res[["CancerType"]]$k__Viruses <- readRDS(file = paste0("2023-03-15-Wilcox-MN_Idx-Viruses-bICI-v1.0.rds"))
+setwd(tmp_path)
+
+
+## Cohort disease
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "05.FeatureSelection/Wilcox_MN-CohDis/rds"))
+
+wil_res[["CohDis"]]$k__Bacteria <- readRDS("2023-03-15-Wilcox-MN_Idx-Bacteria-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Eukaryota <- readRDS("2023-03-15-Wilcox-MN_Idx-Eukaryota-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Archaea <- readRDS("2023-03-15-Wilcox-MN_Idx-Archaea-CohDis-v1.0.rds")
+wil_res[["CohDis"]]$k__Viruses <- readRDS("2023-03-15-Wilcox-MN_Idx-Viruses-CohDis-v1.0.rds")
+setwd(tmp_path)
+
+```
+
+## selected candidates 1
+
+criteria:
+  cancer type p = 0.1, n = 2
+  cohort disease p = 0.1 n = 3
+ 
+```{r}
+Wilcox_sel_function <- function(df, pvalue = 0.1, num = 2){
+  df1 <- df[rowSums(df < pvalue) >= num, ]
+  return(df1)
+}
+
+phylotree_cand <- list()
+
+
+## cancer type for Bacteria (p = 0.1; n = 2)
+phylotree_cand$CancerType$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 2)
+ShortName(phylotree_cand$CancerType$k__Bacteria %>% rownames())
+nrow(phylotree_cand$CancerType$k__Bacteria) # 20
+
+
+## cancer type for Eukaryota (p = 0.1; n = 2)
+phylotree_cand$CancerType$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 2)
+ShortName(phylotree_cand$CancerType$k__Eukaryota %>% rownames())
+nrow(phylotree_cand$CancerType$k__Eukaryota) # 160
+
+
+## cancer type for Archaea (p = 0.1; n = 2)
+phylotree_cand$CancerType$k__Archaea <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Archaea$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 2)
+ShortName(phylotree_cand$CancerType$k__Archaea %>% rownames())
+nrow(phylotree_cand$CancerType$k__Archaea) # 15
+
+
+## cancer type for Viruses (p = 0.1; n = 2)
+phylotree_cand$CancerType$k__Viruses <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Viruses$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 2)
+ShortName(phylotree_cand$CancerType$k__Viruses %>% rownames())
+nrow(phylotree_cand$CancerType$k__Viruses) # 4
+
+
+
+
+
+## CohDis for Bacteria (p = 0.1; n = 3)
+phylotree_cand$CohDis$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 3)
+ShortName(phylotree_cand$CohDis$k__Bacteria %>% rownames())
+nrow(phylotree_cand$CohDis$k__Bacteria) # 46
+
+
+## CohDis for Eukaryota (p = 0.1; n = 3)
+phylotree_cand$CohDis$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 3)
+ShortName(phylotree_cand$CohDis$k__Eukaryota %>% rownames())
+nrow(phylotree_cand$CohDis$k__Eukaryota) # 179
+
+## CohDis for Bacteria (p = 0.1; n = 3)
+phylotree_cand$CohDis$k__Archaea <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Archaea$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 3)
+ShortName(phylotree_cand$CohDis$k__Archaea %>% rownames())
+nrow(phylotree_cand$CohDis$k__Archaea) # 4
+
+## CohDis for Bacteria (p = 0.1; n = 3)
+phylotree_cand$CohDis$k__Viruses <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Viruses$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 3)
+ShortName(phylotree_cand$CohDis$k__Viruses %>% rownames())
+nrow(phylotree_cand$CohDis$k__Viruses) # 1
+
+
+```
+
+## selected candidates 2
+
+criteria:
+  cancer type p = 0.1, n = 2
+  cohort disease p = 0.1 n = 4
+
+```{r}
+
+phylotree_cand2 <- list()
+
+
+## cancer type for Bacteria (p = 0.1; n = 2)
+phylotree_cand2$CancerType$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 2)
+ShortName(phylotree_cand2$CancerType$k__Bacteria %>% rownames())
+nrow(phylotree_cand2$CancerType$k__Bacteria) # 20
+
+
+## cancer type for Eukaryota (p = 0.1; n = 2)
+phylotree_cand2$CancerType$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 2)
+ShortName(phylotree_cand2$CancerType$k__Eukaryota %>% rownames())
+nrow(phylotree_cand2$CancerType$k__Eukaryota) # 160
+
+
+## cancer type for Archaea (p = 0.1; n = 2)
+phylotree_cand2$CancerType$k__Archaea <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Archaea$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 2)
+ShortName(phylotree_cand2$CancerType$k__Archaea %>% rownames())
+nrow(phylotree_cand2$CancerType$k__Archaea) # 15
+
+
+## cancer type for Viruses (p = 0.1; n = 2)
+phylotree_cand2$CancerType$k__Viruses <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Viruses$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 2)
+ShortName(phylotree_cand2$CancerType$k__Viruses %>% rownames())
+nrow(phylotree_cand2$CancerType$k__Viruses) # 4
+
+
+
+
+
+## CohDis for Bacteria (p = 0.1; n = 4)
+phylotree_cand2$CohDis$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 4)
+ShortName(phylotree_cand2$CohDis$k__Bacteria %>% rownames())
+nrow(phylotree_cand2$CohDis$k__Bacteria) # 14
+
+
+## CohDis for Eukaryota (p = 0.1; n = 4)
+phylotree_cand2$CohDis$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 4)
+ShortName(phylotree_cand2$CohDis$k__Eukaryota %>% rownames())
+nrow(phylotree_cand2$CohDis$k__Eukaryota) # 28
+
+## CohDis for Bacteria (p = 0.1; n = 4)
+phylotree_cand2$CohDis$k__Archaea <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Archaea$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 4)
+ShortName(phylotree_cand2$CohDis$k__Archaea %>% rownames())
+nrow(phylotree_cand2$CohDis$k__Archaea) # 0
+
+## CohDis for Bacteria (p = 0.1; n = 4)
+phylotree_cand2$CohDis$k__Viruses <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Viruses$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.1, num = 4)
+ShortName(phylotree_cand2$CohDis$k__Viruses %>% rownames())
+nrow(phylotree_cand2$CohDis$k__Viruses) # 0
+
+
+```
+
+
+## selected candidates 3
+
+criteria:
+  cancer type p = 0.05, n = 2
+  cohort disease p = 0.05 n = 4
+
+```{r}
+
+phylotree_cand3 <- list()
+
+
+## cancer type for Bacteria (p = 0.05; n = 2)
+phylotree_cand3$CancerType$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(phylotree_cand3$CancerType$k__Bacteria %>% rownames())
+nrow(phylotree_cand3$CancerType$k__Bacteria) # 8
+
+
+## cancer type for Eukaryota (p = 0.05; n = 2)
+phylotree_cand3$CancerType$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(phylotree_cand3$CancerType$k__Eukaryota %>% rownames())
+nrow(phylotree_cand3$CancerType$k__Eukaryota) # 39
+
+
+## cancer type for Archaea (p = 0.05; n = 2)
+phylotree_cand3$CancerType$k__Archaea <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Archaea$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(phylotree_cand3$CancerType$k__Archaea %>% rownames())
+nrow(phylotree_cand3$CancerType$k__Archaea) # 4
+
+
+## cancer type for Viruses (p = 0.05; n = 2)
+phylotree_cand3$CancerType$k__Viruses <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Viruses$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(phylotree_cand3$CancerType$k__Viruses %>% rownames())
+nrow(phylotree_cand3$CancerType$k__Viruses) # 0
+
+
+
+
+
+## CohDis for Bacteria (p = 0.05; n = 4)
+phylotree_cand3$CohDis$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 4)
+ShortName(phylotree_cand3$CohDis$k__Bacteria %>% rownames())
+nrow(phylotree_cand3$CohDis$k__Bacteria) # 1
+
+
+## CohDis for Eukaryota (p = 0.05; n = 4)
+phylotree_cand3$CohDis$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 4)
+ShortName(phylotree_cand3$CohDis$k__Eukaryota %>% rownames())
+nrow(phylotree_cand3$CohDis$k__Eukaryota) # 3
+
+## CohDis for Bacteria (p = 0.05; n = 4)
+phylotree_cand3$CohDis$k__Archaea <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Archaea$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 4)
+ShortName(phylotree_cand3$CohDis$k__Archaea %>% rownames())
+nrow(phylotree_cand3$CohDis$k__Archaea) # 0
+
+## CohDis for Bacteria (p = 0.05; n = 4)
+phylotree_cand3$CohDis$k__Viruses <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Viruses$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 4)
+ShortName(phylotree_cand3$CohDis$k__Viruses %>% rownames())
+nrow(phylotree_cand3$CohDis$k__Viruses) # 0
+
+
+```
+
+
+
+
+## selected candidates 4
+
+criteria (intersect):
+  cancer type p = 0.05, n = 2
+  cohort disease p = 0.05, n = 4
+
+```{r}
+
+phylotree_cand4 <- list()
+
+
+## cancer type for Bacteria (p = 0.05; n = 2)
+phylotree_cand4$CancerType$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(phylotree_cand4$CancerType$k__Bacteria %>% rownames())
+nrow(phylotree_cand4$CancerType$k__Bacteria) # 1
+
+
+## cancer type for Eukaryota (p = 0.05; n = 2)
+phylotree_cand4$CancerType$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(phylotree_cand4$CancerType$k__Eukaryota %>% rownames())
+nrow(phylotree_cand4$CancerType$k__Eukaryota) # 0
+
+
+## cancer type for Archaea (p = 0.05; n = 2)
+phylotree_cand4$CancerType$k__Archaea <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Archaea$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(phylotree_cand4$CancerType$k__Archaea %>% rownames())
+nrow(phylotree_cand4$CancerType$k__Archaea) # 0
+
+
+## cancer type for Viruses (p = 0.05; n = 2)
+phylotree_cand4$CancerType$k__Viruses <- Wilcox_sel_function(
+  df = wil_res$CancerType$k__Viruses$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 2)
+ShortName(phylotree_cand4$CancerType$k__Viruses %>% rownames())
+nrow(phylotree_cand4$CancerType$k__Viruses) # 0
+
+
+
+
+
+## CohDis for Bacteria (p = 0.05;  n = 3)
+phylotree_cand4$CohDis$k__Bacteria <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Bacteria$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 3)
+ShortName(phylotree_cand4$CohDis$k__Bacteria %>% rownames())
+nrow(phylotree_cand4$CohDis$k__Bacteria) # 0
+
+
+## CohDis for Eukaryota (p = 0.05;  n = 3)
+phylotree_cand4$CohDis$k__Eukaryota <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Eukaryota$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 3)
+ShortName(phylotree_cand4$CohDis$k__Eukaryota %>% rownames())
+nrow(phylotree_cand4$CohDis$k__Eukaryota) # 0
+
+## CohDis for Bacteria (p = 0.05;  n = 3)
+phylotree_cand4$CohDis$k__Archaea <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Archaea$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 3)
+ShortName(phylotree_cand4$CohDis$k__Archaea %>% rownames())
+nrow(phylotree_cand4$CohDis$k__Archaea) # 0
+
+## CohDis for Bacteria (p = 0.05;  n = 3)
+phylotree_cand4$CohDis$k__Viruses <- Wilcox_sel_function(
+  df = wil_res$CohDis$k__Viruses$wil_df %>%
+    .[,-ncol(.)],
+  pvalue = 0.05, num = 3)
+ShortName(phylotree_cand4$CohDis$k__Viruses %>% rownames())
+nrow(phylotree_cand4$CohDis$k__Viruses) # 0
+
+
+```
+### Candidate 4 plot barplot
+
+```{r barplot for candidate 4}
+barplot_cand_list4 <- list(
+  k__Bacteria = intersect(phylotree_cand4$CancerType$k__Bacteria %>% 
+                           rownames(), 
+                         phylotree_cand4$CohDis$k__Bacteria %>% 
+                           rownames()),
+  k__Eukaryota = intersect(phylotree_cand4$CancerType$k__Eukaryota %>% 
+                            rownames(), 
+                          phylotree_cand4$CohDis$k__Eukaryota %>% 
+                            rownames()))
+
+barplot_df <- matrix(
+  data = NA, 
+  nrow = 0,
+  ncol = c(4+11+2)) %>%
+  as.data.frame() %>%
+  set_colnames(c(colnames(phylotree_cand2$CancerType$k__Bacteria),
+                    colnames(phylotree_cand2$CohDis$k__Bacteria),
+                 "Kingdom", "ShortName"))
+
+  
+  
+
+for (i in unlist(barplot_cand_list4)) {
+  kd <- strsplit(i, split = "\\|")[[1]][1]
+  barplot_df <- rbind.data.frame(
+    barplot_df,
+    do.call(cbind,
+            list(wil_res$CancerType[[kd]]$FC_df[i, 1:4],
+                 wil_res$CohDis[[kd]]$FC_df[i, 1:11],
+                 kd, ShortName(i))) %>%
+      set_colnames(colnames(barplot_df)))
+}
+
+barplot_melt <- melt(barplot_df, id.vars = c('Kingdom', 'ShortName'),
+                     variable.name = "Group", 
+                     value.name = "FC") %>%
+  mutate(sub_group = c(rep("CancerType", 48), 
+                       rep("CohortDis", 132)),
+         EnrDep = ifelse(.$FC >1, "Enr", ifelse(.$FC == 1, "Non", "Dep")),
+         absFC = ifelse(.$FC >1, .$FC, (1/.$FC)),
+         dirFC = ifelse(.$FC >1, .$FC, -(1/.$FC))) %>%
+  mutate(log2absFC = log(absFC, base = 2)) %>%
+  mutate(dirLog2absFC = ifelse(EnrDep == "Enr", log2absFC, -(log2absFC)),
+         Cancer = ifelse(.$Group %in% c('MM', 'NSCLC', 'RCC', "HCC"), 
+                         as.character(.$Group),
+                         gsub("^.+_", "", .$Group)))
+
+
+g <- ggplot(barplot_melt %>%
+              filter(sub_group == "CancerType"), 
+            aes(x = Group, y = dirLog2absFC)) + 
+  geom_col(position = position_dodge()) + 
+  facet_wrap(~ShortName)
+  
+
+
+```
+
+### Candidate 3 plot barplot
+
+```{r barplot for candidate 4}
+barplot_cand_list3 <- list(
+  k__Bacteria = union(phylotree_cand3$CancerType$k__Bacteria %>% 
+                           rownames(), 
+                         phylotree_cand3$CohDis$k__Bacteria %>% 
+                           rownames()),
+  k__Eukaryota = union(phylotree_cand3$CancerType$k__Eukaryota %>% 
+                            rownames(), 
+                          phylotree_cand3$CohDis$k__Eukaryota %>% 
+                            rownames()),
+  k__Archaea = union(phylotree_cand3$CancerType$k__Archaea %>% 
+                            rownames(), 
+                          phylotree_cand3$CohDis$k__Archaea %>% 
+                            rownames()))
+
+barplot_df <- matrix(
+  data = NA, 
+  nrow = 0,
+  ncol = c(4+11+2)) %>%
+  as.data.frame() %>%
+  set_colnames(c(colnames(phylotree_cand2$CancerType$k__Bacteria),
+                    colnames(phylotree_cand2$CohDis$k__Bacteria),
+                 "Kingdom", "ShortName"))
+
+  
+  
+
+for (i in unlist(barplot_cand_list3)) {
+  kd <- strsplit(i, split = "\\|")[[1]][1]
+  barplot_df <- rbind.data.frame(
+    barplot_df,
+    do.call(cbind,
+            list(wil_res$CancerType[[kd]]$FC_df[i, 1:4],
+                 wil_res$CohDis[[kd]]$FC_df[i, 1:11],
+                 kd, ShortName(i))) %>%
+      set_colnames(colnames(barplot_df)))
+}
+
+barplot_melt <- melt(barplot_df, id.vars = c('Kingdom', 'ShortName'),
+                     variable.name = "Group", 
+                     value.name = "FC") %>% 
+  mutate(sub_group = c(rep("CancerType", 4*nrow(barplot_df)), 
+                       rep("CohortDis", 11*nrow(barplot_df))),
+         EnrDep = ifelse(.$FC >1, "Enr", ifelse(.$FC == 1, "Non", "Dep")),
+         absFC = ifelse(.$FC >1, .$FC, (1/.$FC)),
+         dirFC = ifelse(.$FC >1, .$FC, -(1/.$FC))) %>%
+  mutate(log2absFC = log(absFC, base = 2)) %>%
+  mutate(dirLog2absFC = ifelse(EnrDep == "Enr", log2absFC, -(log2absFC)),
+         Cancer = ifelse(.$Group %in% c('MM', 'NSCLC', 'RCC', "HCC"), 
+                         as.character(.$Group),
+                         gsub("^.+_", "", .$Group)))
+
+
+g <- ggplot(barplot_melt %>%
+              filter(sub_group == "CancerType"), 
+            aes(x = Group, y = dirLog2absFC)) + 
+  geom_col(position = position_dodge(), aes(fill = Cancer)) +
+  # geom_col(position = position_dodge(), aes(col = Cancer, fill = EnrDep)) +
+  # geom_hline(yintercept = c(log2(1.5), -log2(1.5)),
+             # linetype='dashed') + 
+  facet_wrap(~ShortName, scales = "free", nrow = 8) + 
+  # scale_color_manual(values = c(cancer_col)) + 
+  scale_fill_manual(values = c(cancer_col)) + 
+  # scale_fill_manual(values = c(Enr = "red", Dep = "blue")) + 
+  theme_bw() + 
+  theme(strip.background = element_rect(fill="white")) 
+  # geom_point(data = barplot_melt %>%
+  #             filter(sub_group != "CancerType"),
+  #            aes(x = Cancer, y = dirLog2absFC),
+  #            shape = 3, size = 1, col = "grey")
+  
+barplot_pdf <- FileCreate(DirPath = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/08.PhyloTree/Barplot"),
+                        Prefix = "candidate3_all52", Suffix = "pdf")
+# pdf(file = barplot_pdf, width = 40, height = 35)
+# pdf(file = barplot_pdf, width = 16, height = 14)
+pdf(file = barplot_pdf, width = 10.5, height = 10.5)
+plot(g)
+plot(g + theme(legend.position = "none", text = element_blank()))
+dev.off()
+
+barplot_df2 <- barplot_df %>%
+  mutate(Sel = ifelse(rowSums(.[,1:4] > 1.5) >=3, "Enr", ifelse(rowSums(.[,1:4] < 1/1.5) >=3, "Dep", "Non")))
+
+table(barplot_df2$Sel)
+
+barplot_csv <- FileCreate(DirPath = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/08.PhyloTree/Barplot"),
+                        Prefix = "candidate3_all52", Suffix = "csv")
+write.csv(x = barplot_df2, file = barplot_csv)
+
+```
+
+## candidate summary
+
+```{r}
+
+phylotree_cand_list <- list(
+  k__Bacteria = unique(c(phylotree_cand$CancerType$k__Bacteria %>% 
+                           rownames(), 
+                         phylotree_cand$CohDis$k__Bacteria %>% 
+                           rownames())),
+  k__Eukaryota = unique(c(phylotree_cand$CancerType$k__Eukaryota %>% 
+                            rownames(), 
+                          phylotree_cand$CohDis$k__Eukaryota %>% 
+                            rownames())),
+  k__Archaea = unique(c(phylotree_cand$CancerType$k__Archaea %>% 
+                            rownames(), 
+                          phylotree_cand$CohDis$k__Archaea %>% 
+                            rownames())),
+  k__Viruses = unique(c(phylotree_cand$CancerType$k__Viruses %>% 
+                            rownames(), 
+                          phylotree_cand$CohDis$k__Viruses %>% 
+                            rownames()))
+)
+
+lapply(phylotree_cand_list, length)
+cand_mean_df <- data.frame(
+  Species = c(phylotree_cand_list$k__Bacteria,
+              phylotree_cand_list$k__Eukaryota,
+              phylotree_cand_list$k__Archaea, 
+              phylotree_cand_list$k__Viruses) %>% 
+    ShortName(),
+  MeanRelAbund = c(
+    rowMeans(bICI_ds$k__Bacteria$taxa_abund$Species)[phylotree_cand_list$k__Bacteria],
+    rowMeans(bICI_ds$k__Eukaryota$taxa_abund$Species)[phylotree_cand_list$k__Eukaryota],
+    rowMeans(bICI_ds$k__Archaea$taxa_abund$Species)[phylotree_cand_list$k__Archaea],
+    rowMeans(bICI_ds$k__Viruses$taxa_abund$Species)[phylotree_cand_list$k__Viruses]
+  )*100
+)
+
+cand_mean_csv <- paste0(
+    save_path_prefix,
+    "/10.Revision/MeanRelAbund/all360_mean_Rel_Abund.csv")
+
+write.csv(x = cand_mean_df, file = cand_mean_csv)
+
+
+phylotree_cand_list2 <- list(
+  k__Bacteria = unique(c(phylotree_cand2$CancerType$k__Bacteria %>% 
+                           rownames(), 
+                         phylotree_cand2$CohDis$k__Bacteria %>% 
+                           rownames())),
+  k__Eukaryota = unique(c(phylotree_cand2$CancerType$k__Eukaryota %>% 
+                            rownames(), 
+                          phylotree_cand2$CohDis$k__Eukaryota %>% 
+                            rownames())),
+  k__Archaea = unique(c(phylotree_cand2$CancerType$k__Archaea %>% 
+                            rownames(), 
+                          phylotree_cand2$CohDis$k__Archaea %>% 
+                            rownames())),
+  k__Viruses = unique(c(phylotree_cand2$CancerType$k__Viruses %>% 
+                            rownames(), 
+                          phylotree_cand2$CohDis$k__Viruses %>% 
+                            rownames()))
+)
+
+lapply(phylotree_cand_list2, length)
+
+
+
+phylotree_cand_list3 <- list(
+  k__Bacteria = unique(c(phylotree_cand3$CancerType$k__Bacteria %>% 
+                           rownames(), 
+                         phylotree_cand3$CohDis$k__Bacteria %>% 
+                           rownames())),
+  k__Eukaryota = unique(c(phylotree_cand3$CancerType$k__Eukaryota %>% 
+                            rownames(), 
+                          phylotree_cand3$CohDis$k__Eukaryota %>% 
+                            rownames())),
+  k__Archaea = unique(c(phylotree_cand3$CancerType$k__Archaea %>% 
+                            rownames(), 
+                          phylotree_cand3$CohDis$k__Archaea %>% 
+                            rownames())),
+  k__Viruses = unique(c(phylotree_cand3$CancerType$k__Viruses %>% 
+                            rownames(), 
+                          phylotree_cand3$CohDis$k__Viruses %>% 
+                            rownames()))
+)
+
+lapply(phylotree_cand_list3, length)
+
+```
+
+
+
+```{r}
+
+phylo_df <- matrix(NA, ncol = c(4 + 4 + 11 + 11 + 3), nrow = 0) %>%
+  as.data.frame() %>%
+  set_colnames(c(colnames(phylotree_cand2$CancerType$k__Bacteria),
+                 paste0(colnames(phylotree_cand2$CancerType$k__Bacteria),"-DepEnr"),
+                 colnames(phylotree_cand2$CohDis$k__Bacteria),
+                 paste0(colnames(phylotree_cand2$CohDis$k__Bacteria),"-DepEnr"),
+                 c("Stars", "Kingdom", "ShortName")))
+                 
+                
+for (i in c(unlist(phylotree_cand_list))) {
+  sp <- strsplit(i, split = "\\|")[[1]][1]
+  phylo_df <- rbind.data.frame(
+    phylo_df,
+    do.call(cbind,
+            list(wil_res$CancerType[[sp]]$wil_df[i, 1:4],
+                 ifelse(wil_res$CancerType[[sp]]$FC_df[i, 1:4] >1, "R", "NR"),
+                 wil_res$CohDis[[sp]]$wil_df[i, 1:11],
+                 ifelse(wil_res$CohDis[[sp]]$FC_df[i, 1:11] >1, "R", "NR"),
+                 matrix(data = c(ifelse(i %in% unlist(phylotree_cand_list2), 
+                                        ifelse(i %in% unlist(phylotree_cand_list3), "sStar", "Star"), "NS"),
+                                 sp, ShortName(i)), ncol = 3))) %>%
+      set_colnames(colnames(phylo_df)))
+  
+}
+
+phylo_df$MeanRelAbundance <- 0
+for (sel_sp in rownames(phylo_df)) {
+  tmp_kd <- phylo_df[sel_sp, "Kingdom"]
+  tmp_mean <- rowMeans(bICI_ds[[tmp_kd]]$taxa_abund$Species[sel_sp,])*100
+  phylo_df[sel_sp, "MeanRelAbundance"] <- as.numeric(tmp_mean)
+}
+
+
+phylo_csv <- FileCreate(DirPath = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/08.PhyloTree"),
+                        Prefix = "PhyloTree_table", Suffix = "csv")
+
+write.csv(x = phylo_df, file = phylo_csv)
+
+table(phylo_df$Kingdom)
+ # k__Archaea  k__Bacteria k__Eukaryota   k__Viruses 
+ #          17           53          286            4 
+
+```
+
+
+## Correlations
+
+Calculate the correlations between the candidates
+
+### Import the `rds` data
+
+```{r correlations}
+tmp_path <- getwd()
+setwd(paste0(save_path_prefix, "01.PreProcessing/MN_Idx/"))
+med_nor_list <- list()
+med_nor_list[["k__Bacteria"]] <- readRDS(file = "MN_res-Bacteria-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Bacteria_mn_res-v1.0.rds")
+med_nor_list[["k__Eukaryota"]] <- readRDS(file = "MN_res-Eukaryota-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Eukaryota_mn_res-v1.0.rds")
+med_nor_list[["k__Archaea"]] <- readRDS(file = "MN_res-Archaea-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Archaea_mn_res-v1.0.rds")
+med_nor_list[["k__Viruses"]] <- readRDS(file = "MN_res-Viruses-cover_10p-cutoff_1e-4-minValue_1e-6/2023-03-15-Viruses_mn_res-v1.0.rds")
+bICI_ds_list <- readRDS("../RDS/2022-10-19-bICI_rare_ds_list_subKingdom-v1.0.rds")
+
+setwd(tmp_path)
+
+
+## filter the selected features, establish a new NormMed matrix
+for (sel_kd in names(med_nor_list)) {
+  med_nor_list[[sel_kd]][["sel_mn_df"]] <- med_nor_list[[sel_kd]][["nm_df"]] %>% 
+    dplyr::select(med_nor_list[[sel_kd]][["sel_otu"]] %>%
+             rownames())%>%
+     filter(rownames(.) %in% 
+              rownames(bICI_ds_list[[sel_kd]]$sample_table)) %>%
+    t() %>% as.data.frame()
+}
+```
+
+
+### calculate the correlations
+
+#### Intra
+
+```{r calculate the correlations intra}
+intra_corr_list <- list()
+flattenCorrMatrix <- function(corr_res) {
+  ut <- upper.tri(corr_res$r)
+  data.frame(
+    row = rownames(corr_res$r)[row(corr_res$r)[ut]],
+    column = rownames(corr_res$r)[col(corr_res$r)[ut]],
+    cor  =(corr_res$r)[ut],
+    p = corr_res$P[ut]
+    )
+}
+
+
+for (sel_kd in unique(phylo_df$Kingdom)) {
+  intra_corr_list[[sel_kd]] <- med_nor_list[[sel_kd]]$sel_mn_df %>%
+    filter(row.names(.) %in% 
+             c(phylo_df %>%
+                 filter(Kingdom == sel_kd) %>%
+                 rownames())) %>%
+    t() %>%
+    as.matrix() %>% 
+    rcorr() %>%
+    flattenCorrMatrix()
+    
+}
+
+sel_intra_corr_list <- intra_corr_list
+for (sel_kd in names(sel_intra_corr_list)) {
+  sel_intra_corr_list[[sel_kd]] <- intra_corr_list[[sel_kd]] %>%
+    filter(p < .05) %>%
+    filter(abs(cor) > .5) # 15 + 26 + 3 +0
+}
+
+lapply(sel_intra_corr_list, nrow)
+
+range_intra_lst <- list()
+for (sel_kd in names(sel_intra_corr_list)) {
+  range_intra_lst[[sel_kd]] <- intra_corr_list[[sel_kd]] %>%
+    filter(p < .05) %>%
+    dplyr::select(cor)
+}
+
+```
+#### trans
+
+```{r calculate the correlations trans}
+
+trans_corr_list <- list()
+
+all_kd <- unique(phylo_df$Kingdom)
+range_trans_lst <- list()
+
+for (sel_kd_n in 1:(length(all_kd) - 1 )) {
+  for (sel_kd2_n in (sel_kd_n + 1): length(all_kd)) {
+    sel_kd <- all_kd[sel_kd_n]
+    sel_kd2 <- all_kd[sel_kd2_n]
+    tmp1 <-  med_nor_list[[sel_kd]]$sel_mn_df %>%
+      filter(row.names(.) %in% 
+               c(phylo_df %>%
+                   filter(Kingdom == sel_kd) %>%
+                   rownames())) 
+    tmp2 <-  med_nor_list[[sel_kd2]]$sel_mn_df %>%
+      filter(row.names(.) %in% 
+               c(phylo_df %>%
+                   filter(Kingdom == sel_kd2) %>%
+                   rownames())) 
+    sel_sample <- intersect(colnames(tmp1), colnames(tmp2)) 
+    
+    corr_res <- rcorr(tmp1[, sel_sample] %>% t(), 
+                      tmp2[, sel_sample] %>% t())
+    ut <- matrix(data = FALSE, nrow = nrow(tmp1) + nrow(tmp2), ncol = nrow(tmp1) + nrow(tmp2))
+    ut[1:nrow(tmp1), (nrow(tmp1) + 1):nrow(ut)] <- rep(TRUE, nrow(tmp1)*nrow(tmp2))
+    trans_corr_list[[paste0(sel_kd, "-", sel_kd2)]] <- data.frame(
+      row = rownames(corr_res$r)[row(corr_res$r)[ut]],
+      column = rownames(corr_res$r)[col(corr_res$r)[ut]],
+      cor  =(corr_res$r)[ut],
+      p = corr_res$P[ut]) %>%
+      filter(p < .05) %>%
+      filter(abs(cor) > .5) 
+    range_trans_lst[[paste0(sel_kd, "-", sel_kd2)]] <- data.frame(
+      row = rownames(corr_res$r)[row(corr_res$r)[ut]],
+      column = rownames(corr_res$r)[col(corr_res$r)[ut]],
+      cor  =(corr_res$r)[ut],
+      p = corr_res$P[ut]) %>%
+      filter(p < .05) %>%
+      dplyr::select(cor)
+  }
+}
+
+
+
+
+
+```
+
+
+#### Combine
+
+
+```{r combine correlations}
+comb_df <- do.call(rbind.data.frame,
+                   list(sel_intra_corr_list$k__Bacteria,
+                        sel_intra_corr_list$k__Eukaryota,
+                        sel_intra_corr_list$k__Archaea,
+                        sel_intra_corr_list$k__Viruses,
+                        trans_corr_list$`k__Bacteria-k__Eukaryota`,
+                        trans_corr_list$`k__Bacteria-k__Archaea`,
+                        trans_corr_list$`k__Bacteria-k__Viruses`,
+                        trans_corr_list$`k__Eukaryota-k__Archaea`,
+                        trans_corr_list$`k__Eukaryota-k__Viruses`,
+                        trans_corr_list$`k__Archaea-k__Viruses`)) %>%
+  mutate(trans_intra = c(rep("intra", lapply(sel_intra_corr_list, nrow) %>% unlist() %>%sum()),
+                         rep("trans", lapply(trans_corr_list, nrow) %>% unlist() %>%sum())))
+dim(comb_df)
+
+
+
+phylo_cor_csv <- FileCreate(DirPath = paste0("../../../cuhk/metagenome/20211108-LYF-Immunotherapy_Cancer/08.PhyloTree"),
+                        Prefix = "PhyloTree_correlation", Suffix = "csv")
+
+write.csv(x = comb_df, file = phylo_cor_csv)
+
+```
+
+
+### comparison different groups
+
+#### calculate the correlations in different groups
+
+```{r correlations in different group}
+
+response_lst <- list()
+
+fisher_lst <- list()
+
+all_spearman_lst <- list()
+
+
+for (sel_kd in unique(phylo_df$Kingdom)) {
+  all_spearman_lst[[sel_kd]][["R"]][["RawData"]] <-
+    med_nor_list[[sel_kd]]$sel_mn_df %>%
+    filter(row.names(.) %in%
+             c(phylo_df %>%
+                 filter(Kingdom == sel_kd) %>%
+                 rownames())) %>%
+    dplyr::select(bICI_ds_list[[sel_kd]]$sample_table %>%
+                    filter(Response == "R") %>%
+                    rownames()) %>%
+    t() %>%
+    as.matrix()
+  
+  all_spearman_lst[[sel_kd]][["R"]][["RawData"]][1:10, 1] <- NA
+  
+  all_spearman_lst[[sel_kd]][["R"]][["Corr"]] <- 
+    all_spearman_lst[[sel_kd]][["R"]][["RawData"]] %>%
+    rcorr()
+  
+  
+  all_spearman_lst[[sel_kd]][["NR"]][["RawData"]] <- 
+    med_nor_list[[sel_kd]]$sel_mn_df %>%
+    filter(row.names(.) %in%
+             c(phylo_df %>%
+                 filter(Kingdom == sel_kd) %>%
+                 rownames())) %>%
+    dplyr::select(bICI_ds_list[[sel_kd]]$sample_table %>%
+                    filter(Response == "NR") %>%
+                    rownames()) %>%
+    t() %>%
+    as.matrix()
+  
+  all_spearman_lst[[sel_kd]][["NR"]][["Corr"]] <- 
+    all_spearman_lst[[sel_kd]][["NR"]][["RawData"]] %>%
+    rcorr()
+  fisher_res <- Fisher_z_test(mat_r1 = response_df$r, 
+                              n1 = bICI_ds_list[[sel_kd]]$sample_table %>%
+                                filter(Response == "R") %>%
+                                nrow(),
+                              mat_r2 = nonresponse_df$r,
+                              n2 = bICI_ds_list[[sel_kd]]$sample_table %>%
+                                filter(Response == "NR") %>%
+                                nrow())
+  response_lst[[sel_kd]] <- fisher_res
+  ut <- upper.tri(fisher_res)
+  fisher_melt <- data.frame(
+    row = rownames(fisher_res)[row(fisher_res)[ut]],
+    column = rownames(fisher_res)[col(fisher_res)[ut]],
+    p  =(fisher_res)[ut],
+    R_rho = response_df$r[ut],
+    R_p = response_df$P[ut],
+    NR_rho = nonresponse_df$r[ut],
+    NR_p = nonresponse_df$P[ut]) %>%
+    mutate(row_short = ShortName(row),
+           column_short = ShortName(column))
+  fisher_lst[[sel_kd]] <- fisher_melt
+}
+
+```
+
+
+
+#### calculate the correlations in different groups
+
+```{r correlations in different group}
+
+response_lst <- list()
+
+fisher_lst <- list()
+
+all_spearman_lst <- list()
+
+all_sample_lst <- list()
+
+
+for (sel_kd in unique(phylo_df$Kingdom)) {
+  all_spearman_lst[[sel_kd]][["R"]][["RawData"]] <-
+    med_nor_list[[sel_kd]]$sel_mn_df %>%
+    filter(row.names(.) %in%
+             c(phylo_df %>%
+                 filter(Kingdom == sel_kd) %>%
+                 rownames())) %>%
+    dplyr::select(bICI_ds_list[[sel_kd]]$sample_table %>%
+                    filter(Response == "R") %>%
+                    rownames()) %>%
+    t() %>%
+    as.matrix()
+  all_sample_lst[["R"]] <- union(
+    all_sample_lst[["R"]], 
+    rownames(all_spearman_lst[[sel_kd]][["R"]][["RawData"]])
+    )
+  
+  
+  
+  all_spearman_lst[[sel_kd]][["NR"]][["RawData"]] <- 
+    med_nor_list[[sel_kd]]$sel_mn_df %>%
+    filter(row.names(.) %in%
+             c(phylo_df %>%
+                 filter(Kingdom == sel_kd) %>%
+                 rownames())) %>%
+    dplyr::select(bICI_ds_list[[sel_kd]]$sample_table %>%
+                    filter(Response == "NR") %>%
+                    rownames()) %>%
+    t() %>%
+    as.matrix()
+  all_sample_lst[["NR"]] <- union(
+    all_sample_lst[["NR"]], 
+    rownames(all_spearman_lst[[sel_kd]][["NR"]][["RawData"]])
+    )
+}
+
+# combine all the features and samples
+comb_otu_df <- list(
+  R = matrix(data = NA,
+             nrow = length(all_sample_lst$R),
+             ncol = nrow(phylo_df),
+             dimnames = list(all_sample_lst$R, rownames(phylo_df))),
+  NR = matrix(data = NA,
+              nrow = length(all_sample_lst$NR),
+              ncol = nrow(phylo_df),
+             dimnames = list(all_sample_lst$NR, rownames(phylo_df)))
+)
+for (sel_kd in names(all_spearman_lst)) {
+  comb_otu_df[["R"]][rownames(all_spearman_lst[[sel_kd]][["R"]][["RawData"]]),
+                     colnames(all_spearman_lst[[sel_kd]][["R"]][["RawData"]])] <- 
+    all_spearman_lst[[sel_kd]][["R"]][["RawData"]]
+  comb_otu_df[["NR"]][rownames(all_spearman_lst[[sel_kd]][["NR"]][["RawData"]]),
+                      colnames(all_spearman_lst[[sel_kd]][["NR"]][["RawData"]])] <- 
+    all_spearman_lst[[sel_kd]][["NR"]][["RawData"]]
+}
+
+# calculate the correlations
+
+spearman_res <- list(
+  R = rcorr(comb_otu_df$R),
+  NR = rcorr(comb_otu_df$NR)
+)
+
+# fisher z test
+all_fisher_res <- Fisher_z_test(
+  cor1 = spearman_res$R, 
+  cor2 = spearman_res$NR)
+
+ut <- upper.tri(all_fisher_res$z)
+all_fisher_melt <- data.frame(
+  var1 = rownames(all_fisher_res$z)[row(all_fisher_res$z)[ut]],
+  var2 = rownames(all_fisher_res$z)[col(all_fisher_res$z)[ut]],
+  p = all_fisher_res$p[ut],
+  z = all_fisher_res$z[ut]
+)
+
+
+ShortKingdom <- function(x){
+  lapply(x, function(x) {
+                   k <- strsplit( x = x, split = "\\|") %>%
+                     unlist(); 
+                   return(k[1])
+                   }) %>% 
+                 unlist()
+}
+all_fisher_melt_s <- all_fisher_melt %>%
+  mutate(var1 = ShortName(.$var1) %>%
+           gsub("s__", "", .) %>%
+           gsub("_", " ", .),
+         var2 = ShortName(.$var2) %>%
+           gsub("s__", "", .) %>%
+           gsub("_", " ", .), 
+         Kingdom_var1 = ShortKingdom(.$var1),
+         Kingdom_var2 = ShortKingdom(.$var2),
+         Group = ifelse(.$z <0, "NR", "R")) %>%
+  mutate(trans_intra= ifelse(.$Kingdom_var1 == .$Kingdom_var2, "intra", "trans"))
+
+sel_fisher_melt <- all_fisher_melt_s %>%
+  filter(p < .01,
+         abs(z) > 10)
+
+# sel_fisher_melt2 <- sel_fisher_melt %>%
+  # mutate()
+
+write.csv(x = sel_fisher_melt, file = "test.csv", quote=F)
+
+node_df <- rbind.data.frame(sel_fisher_melt[,c("var1", "Kingdom_var1")] %>%
+                              set_colnames(c("feature", "kingdom")),
+                            sel_fisher_melt[,c("var2", "Kingdom_var2")] %>%
+                              set_colnames(c("feature", "kingdom")))
+
+node_df <- node_df[!duplicated(node_df),]
+
+write.csv(x = node_df, file = "node.csv", quote=F)
+
+
+```
+
+#### Plot the heatmap
+
+```{r plot the heatmap}
+
+
+```
+
+
+
+
+
+
+
+
+
+
